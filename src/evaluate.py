@@ -79,18 +79,58 @@ def choose_threshold(
     return best_threshold, table
 
 
+def compute_ks_statistic(y_true, probabilities) -> float:
+    """
+    Tính chỉ số Kolmogorov-Smirnov (KS Statistic) đo lường khả năng phân tách giữa nhóm Tốt (0) và Nợ xấu (1).
+
+    KS = max|TPR - FPR| trên tất cả các ngưỡng.
+    """
+    y_arr = np.asarray(y_true)
+    p_arr = np.asarray(probabilities)
+
+    positives = p_arr[y_arr == 1]
+    negatives = p_arr[y_arr == 0]
+
+    if len(positives) == 0 or len(negatives) == 0:
+        return 0.0
+
+    thresholds = np.sort(np.unique(p_arr))
+    tpr = np.array([np.mean(positives >= t) for t in thresholds])
+    fpr = np.array([np.mean(negatives >= t) for t in thresholds])
+
+    ks_value = float(np.max(np.abs(tpr - fpr)))
+    return ks_value
+
+
+def compute_gini(roc_auc: float) -> float:
+    """Tính chỉ số Gini coefficient = 2 * ROC_AUC - 1."""
+    return float(2.0 * roc_auc - 1.0)
+
+
+def compute_pr_auc_lift(pr_auc: float, default_rate: float) -> float:
+    """Tính tỷ lệ Lift của PR-AUC so với tỷ lệ vỡ nợ tự nhiên (Prevalence Lift)."""
+    if default_rate <= 0:
+        return 0.0
+    return float(pr_auc / default_rate)
+
+
 def classification_metrics(y_true, probabilities, threshold: float) -> dict[str, float]:
     """
-    Tính toán tập hợp các chỉ số đánh giá toàn diện cho bài toán mất cân bằng lớp.
+    Tính toán tập hợp các chỉ số đánh giá toàn diện cho bài toán tín dụng mất cân bằng lớp.
 
     Các chỉ số được tính:
-    - `pr_auc`: Diện tích dưới đường Precision-Recall Curve (Metric chính bài toán mất cân bằng).
-    - `roc_auc`: Diện tích dưới đường ROC Curve.
+    - `pr_auc`: PR-AUC Curve.
+    - `default_prevalence`: Tỷ lệ nợ xấu tự nhiên trong tập đánh giá.
+    - `pr_auc_lift`: Tỷ lệ cải thiện PR-AUC so với ngẫu nhiên (PR-AUC / prevalence).
+    - `roc_auc`: ROC-AUC Curve.
+    - `gini`: Hệ số Gini (2 * ROC_AUC - 1).
+    - `ks_statistic`: Chỉ số phân tách KS.
     - `f1`: F1-Score tại ngưỡng chọn.
-    - `recall`: Tỷ lệ phát hiện đúng khoản nợ xấu (Sensitivity / True Positive Rate).
+    - `recall`: Tỷ lệ phát hiện đúng khoản nợ xấu.
     - `precision`: Độ chính xác khi cảnh báo rủi ro vỡ nợ.
-    - `balanced_accuracy`: Độ chính xác trung bình giữa hai lớp.
-    - `brier_score`: Độ chính xác của hiệu chỉnh xác suất (Brier Score càng thấp càng tốt).
+    - `balanced_accuracy`: Độ chính xác trung bình hai lớp.
+    - `brier_score`: Độ chính xác của hiệu chỉnh xác suất.
+    - `review_rate`: Tỷ lệ hồ sơ phát cờ báo động / cần xem xét thủ công.
 
     Args:
         y_true: Nhãn thực tế.
@@ -100,16 +140,98 @@ def classification_metrics(y_true, probabilities, threshold: float) -> dict[str,
     Returns:
         dict[str, float]: Từ điển chứa giá trị các chỉ số đo lường.
     """
-    prediction = (probabilities >= threshold).astype(int)
+    y_arr = np.asarray(y_true)
+    p_arr = np.asarray(probabilities)
+    prediction = (p_arr >= threshold).astype(int)
+
+    default_prev = float(np.mean(y_arr)) if len(y_arr) > 0 else 0.0
+    pr_auc_val = float(average_precision_score(y_arr, p_arr))
+    roc_auc_val = float(roc_auc_score(y_arr, p_arr))
+
     return {
-        "pr_auc": float(average_precision_score(y_true, probabilities)),
-        "roc_auc": float(roc_auc_score(y_true, probabilities)),
-        "f1": float(f1_score(y_true, prediction, zero_division=0)),
-        "recall": float(recall_score(y_true, prediction, zero_division=0)),
-        "precision": float(precision_score(y_true, prediction, zero_division=0)),
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, prediction)),
-        "brier_score": float(brier_score_loss(y_true, probabilities)),
+        "pr_auc": pr_auc_val,
+        "default_prevalence": default_prev,
+        "pr_auc_lift": compute_pr_auc_lift(pr_auc_val, default_prev),
+        "roc_auc": roc_auc_val,
+        "gini": compute_gini(roc_auc_val),
+        "ks_statistic": compute_ks_statistic(y_arr, p_arr),
+        "f1": float(f1_score(y_arr, prediction, zero_division=0)),
+        "recall": float(recall_score(y_arr, prediction, zero_division=0)),
+        "precision": float(precision_score(y_arr, prediction, zero_division=0)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_arr, prediction)),
+        "brier_score": float(brier_score_loss(y_arr, p_arr)),
+        "review_rate": float(np.mean(prediction)),
     }
+
+
+def decile_reliability_table(y_true, probabilities) -> pd.DataFrame:
+    """
+    Tạo Bảng Đánh Giá Độ Tin Cậy và Khả Năng Xếp Hạng Theo 10 Phân Khúc (Decile Reliability Table).
+
+    Chia dữ liệu thành 10 deciles từ xác suất cao nhất đến thấp nhất để đánh giá:
+    - `avg_predicted_pd`: Xác suất vỡ nợ trung bình dự báo.
+    - `actual_default_rate`: Tỷ lệ vỡ nợ thực tế.
+    - `captured_defaults_share`: Tỷ lệ tổng số vụ vỡ nợ được bắt giữ ở từng decile.
+    """
+    df = pd.DataFrame({"y": np.asarray(y_true), "p": np.asarray(probabilities)})
+    df["decile"] = pd.qcut(df["p"].rank(method="first"), q=10, labels=False)
+    # Đảo thứ tự decile (9 -> Decile 1 là rủi ro cao nhất)
+    df["decile"] = 10 - df["decile"]
+
+    total_defaults = df["y"].sum()
+    rows = []
+    for d, group in df.groupby("decile"):
+        n = len(group)
+        group_defaults = group["y"].sum()
+        rows.append(
+            {
+                "decile": int(d),
+                "n_loans": n,
+                "avg_predicted_pd": float(group["p"].mean()),
+                "actual_default_rate": float(group["y"].mean()),
+                "captured_defaults": int(group_defaults),
+                "captured_defaults_share": float(group_defaults / total_defaults) if total_defaults > 0 else 0.0,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("decile").reset_index(drop=True)
+
+
+def choose_capacity_constrained_threshold(
+    y_true,
+    probabilities,
+    max_review_rate: float = 0.20,
+) -> tuple[float, pd.DataFrame]:
+    """
+    Chọn ngưỡng quyết định tín dụng dựa trên giới hạn năng lực thẩm định thủ công (Operational Capacity Constraint).
+
+    Ví dụ: Phòng thẩm định chỉ có thể xử lý tối đa 20% tổng số hồ sơ vay.
+    """
+    p_arr = np.asarray(probabilities)
+    y_arr = np.asarray(y_true)
+
+    rows = []
+    for threshold in np.linspace(0.01, 0.99, 99):
+        pred = (p_arr >= threshold).astype(int)
+        review_rate = np.mean(pred)
+        if review_rate <= max_review_rate:
+            rec = recall_score(y_arr, pred, zero_division=0)
+            prec = precision_score(y_arr, pred, zero_division=0)
+            rows.append(
+                {
+                    "threshold": threshold,
+                    "review_rate": float(review_rate),
+                    "recall": float(rec),
+                    "precision": float(prec),
+                }
+            )
+
+    if not rows:
+        return 0.50, pd.DataFrame()
+
+    table = pd.DataFrame(rows).sort_values("recall", ascending=False)
+    best_threshold = float(table.iloc[0]["threshold"])
+    return best_threshold, table
 
 
 def slice_metrics(

@@ -14,6 +14,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Phiên bản hợp đồng đặc trưng và hợp đồng nhãn mục tiêu (Feature & Target Contracts)
+FEATURE_CONTRACT_VERSION = "loan-origination-v1"
+TARGET_CONTRACT_VERSION = "charged-off-v1"
+
 # Tên cột nhãn mục tiêu trong mô hình
 TARGET = "default_flag"
 
@@ -207,4 +211,55 @@ def build_features(
         )
 
     return features
+
+
+def derive_reason_codes(row: pd.Series | dict) -> list[str]:
+    """
+    Trích xuất danh sách mã nguyên nhân rủi ro (Business Reason Codes) cho một hồ sơ vay.
+
+    Dựa trên các chỉ số tài chính vượt ngưỡng rủi ro phổ biến trong ngành tín dụng:
+    - HIGH_DTI: Tỷ lệ nợ trên thu nhập dti > 20%
+    - SHORT_CREDIT_HISTORY: Thâm niên tín dụng credit_history_years < 3 năm
+    - HIGH_REVOLVING_UTILIZATION: Tỷ lệ sử dụng hạn mức tín dụng > 60%
+    - RECENT_INQUIRIES: Số lần truy vấn tín dụng 6 tháng qua inq_last_6mths >= 2
+    - PRIOR_DELINQUENCIES: Có lịch sử nợ quá hạn delinq_2yrs >= 1
+    - HIGH_INSTALLMENT_RATIO: Tỷ lệ trả góp hàng năm / thu nhập > 15%
+
+    Args:
+        row (pd.Series | dict): Dữ liệu một hồ sơ vay.
+
+    Returns:
+        list[str]: Danh sách mã nguyên nhân gây rủi ro.
+    """
+    reasons = []
+    dti = row.get("dti")
+    if dti is not None and pd.notna(dti) and float(dti) > 20.0:
+        reasons.append("HIGH_DTI")
+
+    util = row.get("revol_util")
+    if util is not None and pd.notna(util):
+        try:
+            val = float(str(util).rstrip("%"))
+            if val > 60.0:
+                reasons.append("HIGH_REVOLVING_UTILIZATION")
+        except ValueError:
+            pass
+
+    inq = row.get("inq_last_6mths")
+    if inq is not None and pd.notna(inq) and float(inq) >= 2.0:
+        reasons.append("RECENT_INQUIRIES")
+
+    delinq = row.get("delinq_2yrs")
+    if delinq is not None and pd.notna(delinq) and float(delinq) >= 1.0:
+        reasons.append("PRIOR_DELINQUENCIES")
+
+    inst = row.get("installment")
+    inc = row.get("annual_inc")
+    if inst and inc and float(inc) > 0:
+        ratio = (12 * float(inst)) / float(inc)
+        if ratio > 0.15:
+            reasons.append("HIGH_INSTALLMENT_RATIO")
+
+    return reasons if reasons else ["GENERAL_CREDIT_RISK"]
+
 

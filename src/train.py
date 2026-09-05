@@ -1,16 +1,15 @@
 """
 Mô-đun Huấn Luyện Pipeline Machine Learning Dự Báo Rủi Ro Vỡ Nợ (Model Training Pipeline).
 
-Quy trình thực hiện:
-1. Nạp và kiểm tra schema guard từ dữ liệu CSV.
-2. Phân chia dữ liệu theo mốc thời gian (Temporal Split) thành Train / Validation / Test.
-3. Tạo ma trận đặc trưng an toàn chống rò rỉ (Point-in-Time Features).
-4. So sánh các mô hình ứng viên (Dummy, Logistic Regression, Random Forest) trên tập Train với 5-fold Stratified CV.
-5. Lựa chọn mô hình tốt nhất (Champion Model) dựa trên chỉ số PR-AUC CV.
-6. Thực hiện hiệu chỉnh xác suất (Sigmoid Calibration / CalibratedClassifierCV) trên tập Train.
-7. Tối ưu ngưỡng phân loại (Decision Threshold) dựa trên tổng chi phí tổn thất tài chính trên tập Validation.
-8. Mở tập Test một lần duy nhất để đánh giá hiệu năng out-of-time và phân tích phân khúc (Slice Metrics).
-9. Xuất báo cáo đánh giá dạng CSV/JSON và lưu artifact hoàn chỉnh dạng joblib phục vụ Deployment.
+Quy trình thực hiện theo 8 giai đoạn chuẩn Platform:
+1. Data Ingestion & Label Maturity Check (Outcome Maturity Gate).
+2. Point-in-Time Feature Contract (loan-origination-v1) & Leakage Denylist.
+3. Feature Engineering (applicant, credit history, derived metrics).
+4. Temporal Development Protocol (Train < 2011, Val 2011 H1, Test 2011 H2 + 3-fold Temporal CV).
+5. Model Development & Champion Selection Policy (Governance Constraints over pure PR-AUC).
+6. Probability Calibration (Temporal Sigmoid Calibration) & Cost/Capacity Thresholding.
+7. Out-of-Time Test Evaluation (PR-AUC, ROC-AUC, KS, Gini, Decile Reliability, Bootstrap CIs).
+8. Serving & Monitoring Artifact Export.
 """
 
 from __future__ import annotations
@@ -52,9 +51,16 @@ from src.evaluate import (
     choose_threshold,
     classification_metrics,
     compute_calibration_diagnostics,
+    decile_reliability_table,
     slice_metrics,
 )
-from src.features import TARGET, build_features, create_target
+from src.features import (
+    FEATURE_CONTRACT_VERSION,
+    TARGET,
+    TARGET_CONTRACT_VERSION,
+    build_features,
+    create_target,
+)
 
 # Cấu hình giá trị ngẫu nhiên cố định để đảm bảo tính tái lập (Reproducibility)
 RANDOM_STATE = 42
@@ -371,11 +377,12 @@ def train(
     champion_estimator = candidate_estimators(random_state)[champion_name]
     base_pipeline = make_pipeline(X_train, champion_estimator)
 
-    # 5. Hiệu chỉnh xác suất bằng Sigmoid Calibration (Platt Scaling) chỉ trên tập Train
+    # 5. Hiệu chỉnh xác suất bằng Sigmoid Calibration (Platt Scaling) bảo toàn thứ tự thời gian trên tập Train
+    temporal_cv_folds = build_temporal_cv(train_data["issue_date"])
     calibrated_pipeline = CalibratedClassifierCV(
         base_pipeline,
         method="sigmoid",
-        cv=3,
+        cv=temporal_cv_folds if len(temporal_cv_folds) > 0 else 3,
         n_jobs=-1,
     )
     calibrated_pipeline.fit(X_train, y_train)
@@ -387,6 +394,7 @@ def train(
     # 7. Mở tập Test để đánh giá kết quả cuối cùng
     test_prob = calibrated_pipeline.predict_proba(X_test)[:, 1]
     metrics = classification_metrics(y_test, test_prob, optimal_threshold)
+    decile_table = decile_reliability_table(y_test, test_prob)
 
     # Tính toán khoảng tin cậy 95% Bootstrap CIs cho các metrics chính
     metric_funcs = {
@@ -400,7 +408,6 @@ def train(
     for m_name, fn in metric_funcs.items():
         val, lower, upper = bootstrap_metric_ci(y_test, test_prob, fn, n_bootstrap=500, random_state=random_state)
         bootstrap_cis[m_name] = {"value": val, "ci_lower": lower, "ci_upper": upper}
-
 
     # Tính toán chẩn đoán hiệu chỉnh xác suất (Calibration Diagnostics)
     calibration_diag = compute_calibration_diagnostics(y_test, test_prob)
@@ -446,6 +453,7 @@ def train(
         "threshold_sensitivity": pd.DataFrame(threshold_sensitivity),
         "target_censoring_report": censoring_report,
         "calibration_test": calibration_table(y_test, test_prob),
+        "decile_reliability": decile_table,
         "drift_psi": drift_report(X_train, X_test),
         "logistic_odds_ratios": logistic_odds_ratios(explanation_pipeline),
     }
@@ -472,6 +480,13 @@ def train(
         "label_definition": {"Fully Paid": 0, "Charged Off": 1},
         "model_name": f"calibrated_{champion_name}",
         "model_version": "1.0.0",
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
+        "target_contract_version": TARGET_CONTRACT_VERSION,
+        "champion_selection_policy": (
+            "Champion selection intentionally excludes interest rate and sub-grade "
+            "to reduce dependence on historical pricing policy."
+        ),
+        "scope_disclaimer": "Estimates Probability of Default (PD) risk only; EAD/LGD models listed in architecture roadmap.",
         "trained_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "data_sha256": data_sha,
         "python_version": sys.version,

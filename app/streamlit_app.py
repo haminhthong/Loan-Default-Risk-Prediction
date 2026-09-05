@@ -235,14 +235,14 @@ def render_diagnostics_tab(artifact: dict[str, Any]) -> None:
 def main() -> None:
     """Hàm chính khởi chạy giao diện Streamlit."""
     st.set_page_config(
-        page_title="Hệ Thống Dự Báo Rủi Ro Vỡ Nợ Khoản Vay",
+        page_title="Loan Default Risk Decision Support Platform",
         page_icon="🏦",
         layout="wide",
         initial_sidebar_state="expanded",
     )
 
-    st.title("🏦 Hệ Thống Đánh Giá Rủi Ro Vỡ Nợ Tín Dụng (Loan Default Risk Prediction)")
-    st.caption("Mô hình Machine Learning chống rò rỉ dữ liệu, hiệu chỉnh xác suất và tối ưu ngưỡng theo chi phí kinh doanh.")
+    st.title("🏦 Loan Default Risk Decision Support Platform")
+    st.caption("A point-in-time, leakage-safe credit-risk decision support platform with temporal validation, calibrated probabilities, and cost-sensitive review thresholds.")
 
     if not MODEL_PATH.exists():
         st.error("⚠️ Chưa tìm thấy file mô hình artifact tại `artifacts/loan_default_cv.joblib`. Vui lòng chạy `python -m src.train` trước!")

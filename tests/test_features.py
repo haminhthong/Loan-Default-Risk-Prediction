@@ -109,3 +109,36 @@ def test_ablation_modes():
 
     f_no_pricing = build_features(df, include_pricing="no_pricing_all")
     assert "installment" not in f_no_pricing.columns and "grade" not in f_no_pricing.columns
+
+
+def test_earliest_cr_line_century_rollover():
+    """Kiểm tra xử lý chính xác mốc rollover thế kỷ (ví dụ Dec-68 và Jan-70)."""
+    df = sample_data()
+    df.loc[0, "earliest_cr_line"] = "Dec-68"
+    df.loc[0, "issue_date"] = pd.to_datetime("2011-12-01")
+    df.loc[1, "earliest_cr_line"] = "Jan-70"
+    df.loc[1, "issue_date"] = pd.to_datetime("2011-12-01")
+
+    features = build_features(df)
+    assert features.loc[0, "credit_history_years"] > 40  # ~43 năm
+    assert features.loc[1, "credit_history_years"] > 40  # ~41.9 năm
+    assert (features["credit_history_years"] >= 0).all()
+
+
+def test_derive_reason_codes():
+    """Kiểm tra trích xuất đúng lý do rủi ro tài chính."""
+    from src.features import derive_reason_codes
+    high_risk_row = {
+        "dti": 25.5,
+        "revol_util": "75.00%",
+        "inq_last_6mths": 3,
+        "delinq_2yrs": 2,
+        "installment": 500,
+        "annual_inc": 30000,
+    }
+    reasons = derive_reason_codes(high_risk_row)
+    assert "HIGH_DTI" in reasons
+    assert "HIGH_REVOLVING_UTILIZATION" in reasons
+    assert "RECENT_INQUIRIES" in reasons
+    assert "PRIOR_DELINQUENCIES" in reasons
+    assert "HIGH_INSTALLMENT_RATIO" in reasons

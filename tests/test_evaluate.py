@@ -74,3 +74,30 @@ def test_calibration_diagnostics():
     assert "calibration_intercept" in diag
     assert "calibration_slope" in diag
     assert 0.0 <= diag["expected_calibration_error"] <= 1.0
+
+
+def test_credit_risk_extended_metrics():
+    """Kiểm tra các metric tín dụng bổ sung: KS statistic, Gini coefficient, PR-AUC Lift và Decile table."""
+    from src.evaluate import (
+        compute_gini,
+        compute_ks_statistic,
+        compute_pr_auc_lift,
+        decile_reliability_table,
+    )
+    target = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+    probabilities = np.array([0.1, 0.15, 0.2, 0.25, 0.3, 0.6, 0.7, 0.8, 0.85, 0.9])
+
+    ks = compute_ks_statistic(target, probabilities)
+    assert ks == 1.0  # Hoàn hảo phân tách
+
+    gini = compute_gini(1.0)
+    assert gini == 1.0
+
+    lift = compute_pr_auc_lift(0.5, 0.2)
+    assert lift == 2.5
+
+    deciles = decile_reliability_table(target, probabilities)
+    assert len(deciles) == 10
+    assert "avg_predicted_pd" in deciles.columns
+    assert "actual_default_rate" in deciles.columns
+    assert "captured_defaults_share" in deciles.columns

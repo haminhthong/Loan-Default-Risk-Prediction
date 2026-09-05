@@ -94,16 +94,44 @@ class ScoreRequest(BaseModel):
     records: list[LoanApplication] = Field(..., min_length=1, max_length=1000, description="Danh sách các hồ sơ cần chấm điểm.")
 
 
+class RiskScore(BaseModel):
+    """Chi tiết điểm xác suất và nhóm rủi ro (PD Risk)."""
+
+    default_probability: float = Field(..., description="Xác suất rủi ro vỡ nợ (0.0 đến 1.0)")
+    risk_band: str = Field(..., description="Phân hạng rủi ro ('LOW', 'MEDIUM', 'HIGH')")
+
+
+class DecisionSupport(BaseModel):
+    """Thông tin tầng quyết định nghiệp vụ độc lập (Operational Decision Layer)."""
+
+    flag_for_review: bool = Field(..., description="Cờ cảnh báo phát tín hiệu xem xét thủ công")
+    threshold: float = Field(..., description="Ngưỡng chi phí/năng lực được áp dụng")
+    policy: str = Field(default="FN5_FP1_COST_SENSITIVE", description="Tên chính sách quyết định chi phí")
+
+
 class ScorePredictionResult(BaseModel):
     """Schema kết quả chấm điểm cho từng hồ sơ."""
 
     default_probability: float = Field(..., description="Xác suất rủi ro vỡ nợ (0.0 đến 1.0)")
     default_prediction: int = Field(..., description="Nhãn quyết định (1: Cảnh báo vỡ nợ, 0: Khả năng tốt)")
+    risk: RiskScore = Field(..., description="Chi tiết PD score và Risk Band")
+    decision_support: DecisionSupport = Field(..., description="Trạng thái cờ và chính sách quyết định")
+    reason_codes: list[str] = Field(default_factory=list, description="Mã nguyên nhân rủi ro")
+
+
+class ModelContractMetadata(BaseModel):
+    """Schema thông tin phiên bản hợp đồng và mô hình."""
+
+    model_name: str = Field(..., description="Tên mô hình Champion")
+    model_version: str = Field(default="1.0.0", description="Phiên bản mô hình")
+    feature_contract_version: str = Field(default="loan-origination-v1", description="Phiên bản hợp đồng đặc trưng")
+    target_contract_version: str = Field(default="charged-off-v1", description="Phiên bản hợp đồng nhãn mục tiêu")
 
 
 class ScoreResponse(BaseModel):
     """Schema phản hồi kết quả API /score."""
 
+    model_metadata: ModelContractMetadata = Field(..., description="Thông tin phiên bản hợp đồng và mô hình")
     model_name: str = Field(..., description="Tên mô hình Champion đang sử dụng")
     model_version: str = Field(default="1.0.0", description="Phiên bản mô hình đã huấn luyện")
     threshold: float = Field(..., description="Ngưỡng quyết định rủi ro được áp dụng")
@@ -143,6 +171,8 @@ def model_info() -> dict[str, Any]:
     return {
         "model_name": artifact.get("model_name"),
         "model_version": artifact.get("model_version", "1.0.0"),
+        "feature_contract_version": artifact.get("feature_contract_version", "loan-origination-v1"),
+        "target_contract_version": artifact.get("target_contract_version", "charged-off-v1"),
         "threshold": artifact.get("threshold"),
         "metrics": artifact.get("metrics"),
         "data_rows": artifact.get("data_rows"),
@@ -174,11 +204,41 @@ def score(payload: ScoreRequest) -> ScoreResponse:
             detail=f"Lỗi cấu trúc hoặc dữ liệu không hợp lệ: {exc}",
         ) from exc
 
-    return ScoreResponse(
+    results = []
+    thresh = artifact["threshold"]
+    for idx, row in predictions_df.iterrows():
+        p = float(row["default_probability"])
+        pred_flag = int(row["default_prediction"])
+        r_band = str(row["risk_band"])
+        reasons = list(row["reason_codes"])
+
+        results.append(
+            ScorePredictionResult(
+                default_probability=p,
+                default_prediction=pred_flag,
+                risk=RiskScore(default_probability=p, risk_band=r_band),
+                decision_support=DecisionSupport(
+                    flag_for_review=bool(pred_flag == 1),
+                    threshold=thresh,
+                    policy="FN5_FP1_COST_SENSITIVE",
+                ),
+                reason_codes=reasons,
+            )
+        )
+
+    contract_meta = ModelContractMetadata(
         model_name=artifact.get("model_name", "Logistic Regression"),
         model_version=artifact.get("model_version", "1.0.0"),
-        threshold=artifact["threshold"],
-        predictions=predictions_df.to_dict(orient="records"),
+        feature_contract_version=artifact.get("feature_contract_version", "loan-origination-v1"),
+        target_contract_version=artifact.get("target_contract_version", "charged-off-v1"),
+    )
+
+    return ScoreResponse(
+        model_metadata=contract_meta,
+        model_name=artifact.get("model_name", "Logistic Regression"),
+        model_version=artifact.get("model_version", "1.0.0"),
+        threshold=thresh,
+        predictions=results,
     )
 
 

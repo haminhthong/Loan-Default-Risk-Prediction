@@ -111,3 +111,24 @@ def test_analyze_target_censoring():
     assert res.loc["2011-01", "total_loans"] == 3
     assert res.loc["2011-01", "Current"] == 1
     assert pytest.approx(res.loc["2011-01", "exclusion_rate"]) == 1 / 3
+
+
+def test_current_loans_never_enter_training():
+    """Đảm bảo các khoản vay 'Current' bị Outcome Maturity Gate loại bỏ tuyệt đối."""
+    from src.features import create_target
+    df = valid_frame()
+    df.loc[0, "loan_status"] = "Current"
+    labeled = create_target(df)
+    assert "Current" not in labeled["loan_status"].values
+    assert set(labeled["default_flag"].unique()).issubset({0, 1})
+
+
+def test_train_dates_precede_validation_and_test():
+    """Đảm bảo ngày phát hành của tập Train luôn trước Validation, và Validation luôn trước Test."""
+    data = valid_frame()
+    data["issue_date"] = pd.to_datetime(data["issue_d"], format="%b-%y")
+    train, val, test = temporal_split(data)
+
+    assert train["issue_date"].max() < val["issue_date"].min()
+    assert val["issue_date"].max() < test["issue_date"].min()
+

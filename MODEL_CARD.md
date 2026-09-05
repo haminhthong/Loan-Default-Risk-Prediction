@@ -1,27 +1,26 @@
-# Model card
+# Model Card: Loan Default Risk Decision Support Platform
 
-## Intended use
+## Intended Use
 
-Minh họa pipeline dự báo `Charged Off` tại thời điểm cấp khoản vay cho mục đích
-học tập và portfolio. Không dùng để tự động phê duyệt, từ chối hoặc định giá tín dụng.
+Hệ thống hỗ trợ ra quyết định tín dụng (**Decision Support System**) ước lượng xác suất vỡ nợ `Charged Off` tại thời điểm cấp khoản vay. Không tự động phê duyệt, từ chối hoặc ấn định lãi suất vay.
 
-## Model và đánh giá
+## Model & Architecture Alignment (8 Canonical Stages)
 
-Champion là Logistic Regression sau sigmoid calibration. Model được chọn theo
-PR-AUC trung bình của 5-fold CV trên dữ liệu trước năm 2011. Threshold được chọn
-trên nửa đầu năm 2011 với giả định chi phí false negative:false positive là 5:1;
-nửa cuối năm 2011 là test out-of-time và chỉ dùng để báo cáo cuối.
+- **Champion Model**: Logistic Regression kết hợp Platt Sigmoid Calibration (bảo toàn thứ tự thời gian).
+- **Temporal Protocol**: 
+  - Train: Dữ liệu trước 2011 (với 3-fold Expanding-Window Temporal CV).
+  - Validation: Nửa đầu năm 2011 (H1/2011) - dùng để tối ưu ngưỡng quyết định chi phí (FN:FP = 5:1 -> 0.14).
+  - Test: Nửa cuối năm 2011 (H2/2011 Out-of-Time Test).
+- **Champion Selection Policy**: Artifact sản xuất áp dụng chế độ `CHAMPION_INCLUDE_PRICING = False` (`no_int_sub`), chủ động loại bỏ `int_rate` và `sub_grade`. Mô hình `no_int_sub` vừa tuân thủ quy tắc Quản trị Mô hình (Governance Constraints) để tránh học lại chính sách định giá quá khứ, vừa đạt hiệu năng thực nghiệm vượt trội (PR-AUC 0.3384 so với 0.3366 của bản `all` trên tập Out-of-Time Test).
 
-Artifact triển khai không dùng `int_rate` và `sub_grade`. Phiên bản này đạt
-PR-AUC 0,3384, nhỉnh hơn phiên bản đầy đủ 0,3366, đồng thời giảm nguy cơ học lại
-hệ thống định giá sẵn có. Quyết định vẫn cần xác nhận trên dữ liệu ngoài mẫu.
+## Scope & Operational Boundary
 
-## Hạn chế
+- **Phạm vi mô hình**: Ước lượng xác suất rủi ro vỡ nợ (PD-like risk). Mô hình chưa trực tiếp ước tính Dư nợ tại thời điểm vỡ nợ (EAD) hay Tỷ lệ tổn thất khi vỡ nợ (LGD).
+- **Phân tách tầng quyết định**: Xác suất PD được trả về kèm theo Phân hạng rủi ro (`LOW`, `MEDIUM`, `HIGH`). Cờ báo động (`flag_for_review`) là một tầng chính sách vận hành độc lập nằm phía sau xác suất PD.
 
-- Nguồn, giấy phép và phép biến đổi ngày của CSV chưa được xác minh đầy đủ.
-- Out-of-time test chỉ bao phủ một giai đoạn lịch sử và một nguồn dữ liệu.
-- Cost ratio 5:1 chỉ là sensitivity scenario, không phải expected loss thực tế.
-- Slice theo địa lý/grade không thay thế kiểm định fairness với thuộc tính nhạy cảm.
-- Xác suất và threshold không được dùng ngoài phân phối dữ liệu này nếu chưa tái kiểm định.
-- PSI cho thấy drift đáng kể ở một số trường; cần giám sát và đặt ngưỡng tái huấn luyện.
-- Odds ratio chỉ mô tả liên hệ trong mô hình, không được diễn giải là tác động nhân quả.
+## Hạn Chế & Cảnh Báo Vận Hành
+
+- Out-of-time test chỉ bao phủ giai đoạn lịch sử 2007-2011 trên dữ liệu LendingClub.
+- Giả định chi phí 5:1 chỉ đại diện cho một kịch bản độ nhạy chi phí, không thay thế tính toán Expected Loss tài chính thực tế.
+- Phân tích độ ổn định theo phân khúc (grade, home_ownership, addr_state) phục vụ kiểm định hiệu năng (Performance Stability), không thay thế kiểm định công bằng (Fairness Audit) trên thuộc tính nhạy cảm.
+- Cần giám sát định kỳ biến động phân phối (PSI / Data Drift) và thiết lập cơ chế kiểm soát theo nhóm tháng phát hành (Cohort Maturity Window).

@@ -16,7 +16,7 @@ from typing import Any
 import joblib
 import pandas as pd
 
-from src.features import build_features
+from src.features import build_features, derive_reason_codes
 
 
 class ArtifactError(RuntimeError):
@@ -70,19 +70,30 @@ def load_artifact(
     return artifact
 
 
-def predict(data: pd.DataFrame, artifact: dict[str, Any]) -> pd.DataFrame:
+def get_risk_band(probability: float) -> str:
+    """Ánh xạ xác suất rủi ro PD sang nhóm phân loại rủi ro (Risk Band)."""
+    if probability < 0.10:
+        return "LOW"
+    elif probability <= 0.25:
+        return "MEDIUM"
+    else:
+        return "HIGH"
 
+
+def predict(data: pd.DataFrame, artifact: dict[str, Any]) -> pd.DataFrame:
     """
-    Thực hiện dự báo xác suất vỡ nợ và đưa ra quyết định tín dụng cho dữ liệu khoản vay mới.
+    Thực hiện dự báo xác suất vỡ nợ và phân hạng rủi ro / đưa ra cờ cảnh báo tín dụng.
 
     Args:
         data (pd.DataFrame): DataFrame chứa dữ liệu hồ sơ khoản vay cần chấm điểm.
         artifact (dict[str, Any]): Artifact mô hình được nạp từ `load_artifact`.
 
     Returns:
-        pd.DataFrame: DataFrame gồm 2 cột:
+        pd.DataFrame: DataFrame gồm các cột:
             - `default_probability`: Xác suất rủi ro vỡ nợ (từ 0.0 đến 1.0).
-            - `default_prediction`: Nhãn dự báo (1: Rủi ro vỡ nợ / Cảnh báo, 0: Khả năng cao thanh toán đủ).
+            - `risk_band`: Hạng rủi ro ('LOW', 'MEDIUM', 'HIGH').
+            - `default_prediction`: Nhãn phát cờ xem xét thủ công (1: Cảnh báo / 0: Bình thường).
+            - `reason_codes`: Danh sách các mã nguyên nhân gây rủi ro chính.
     """
     include_pricing = artifact.get("include_pricing_features", False)
 
@@ -99,10 +110,18 @@ def predict(data: pd.DataFrame, artifact: dict[str, Any]) -> pd.DataFrame:
     threshold = artifact["threshold"]
     prediction = (probability >= threshold).astype(int)
 
+    # 5. Phân nhóm rủi ro và mã nguyên nhân
+    risk_bands = [get_risk_band(p) for p in probability]
+    reason_codes = [
+        derive_reason_codes(row) for _, row in data.iterrows()
+    ]
+
     return pd.DataFrame(
         {
             "default_probability": probability,
+            "risk_band": risk_bands,
             "default_prediction": prediction,
+            "reason_codes": reason_codes,
         },
         index=data.index,
     )

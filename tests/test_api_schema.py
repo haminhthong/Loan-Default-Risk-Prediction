@@ -90,6 +90,11 @@ def test_score_valid_request(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert "predictions" in body
+    assert "model_metadata" in body
     assert len(body["predictions"]) == 1
-    assert "default_probability" in body["predictions"][0]
-    assert "default_prediction" in body["predictions"][0]
+    pred = body["predictions"][0]
+    assert "default_probability" in pred
+    assert "default_prediction" in pred
+    assert "risk" in pred and "risk_band" in pred["risk"]
+    assert "decision_support" in pred and "flag_for_review" in pred["decision_support"]
+    assert "reason_codes" in pred

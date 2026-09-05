@@ -12,7 +12,7 @@ from tests.test_features import sample_data
 
 
 def test_prediction_schema():
-    """Kiểm tra kết quả dự báo phải giữ đúng số dòng và đủ 2 cột default_probability, default_prediction."""
+    """Kiểm tra kết quả dự báo giữ đúng số dòng và bao gồm default_probability, risk_band, default_prediction, reason_codes."""
     raw = sample_data().iloc[:2]
     features = build_features(raw)
     model = DummyClassifier(strategy="prior").fit(features, [0, 1])
@@ -23,8 +23,26 @@ def test_prediction_schema():
         "include_pricing_features": True,
     }
     result = predict(raw, artifact)
-    assert result.columns.tolist() == ["default_probability", "default_prediction"]
+    assert set(["default_probability", "risk_band", "default_prediction", "reason_codes"]).issubset(result.columns)
     assert len(result) == 2
+    assert result.loc[0, "risk_band"] in ["LOW", "MEDIUM", "HIGH"]
+
+
+def test_unknown_category_inference():
+    """Kiểm tra mô hình suy luận ổn định khi gặp phân loại chưa từng xuất hiện (Unknown Categorical Value)."""
+    raw = sample_data().iloc[:2].copy()
+    raw.loc[0, "addr_state"] = "ZZ"  # Bang lạ chưa có lúc train
+    features = build_features(raw)
+    model = DummyClassifier(strategy="prior").fit(features, [0, 1])
+    artifact = {
+        "pipeline": model,
+        "threshold": 0.5,
+        "feature_columns": features.columns.tolist(),
+        "include_pricing_features": True,
+    }
+    result = predict(raw, artifact)
+    assert len(result) == 2
+    assert not result["default_probability"].isna().any()
 
 
 def test_prediction_preserves_index():

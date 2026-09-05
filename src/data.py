@@ -86,9 +86,9 @@ def load_data(path: str | Path) -> pd.DataFrame:
 
 def temporal_split(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Chia dữ liệu thành 3 tập Train, Validation, Test theo mốc thời gian phát hành (issue_date).
+    Giai đoạn 4: Chia dữ liệu thành 3 tập Train, Validation, Test theo mốc thời gian phát hành (issue_date).
 
-    Nguyên tắc chống rò rỉ dữ liệu (Anti-Leakage):
+    Nguyên tắc chống rò rỉ dữ liệu (Temporal Out-of-Time Protocol):
     - Tập Train: Các khoản vay phát hành trước 2011-01-01.
     - Tập Validation: Các khoản vay phát hành nửa đầu năm 2011 (2011-01-01 đến 2011-06-30).
     - Tập Test: Các khoản vay phát hành nửa cuối năm 2011 (từ 2011-07-01 trở đi).
@@ -100,7 +100,7 @@ def temporal_split(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: (train_df, validation_df, test_df)
 
     Raises:
-        ValueError: Nếu một trong các tập bị rỗng do không đủ khoảng thời gian dữ liệu.
+        ValueError: Nếu một trong các tập bị rỗng hoặc không tuân thủ mốc thời gian.
     """
     train = data.loc[data["issue_date"] < "2011-01-01"].copy()
     validation = data.loc[
@@ -114,6 +114,12 @@ def temporal_split(data: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
             f"Không đủ dữ liệu cho phân chia theo thời gian. "
             f"Số lượng bản ghi: Train={len(train)}, Val={len(validation)}, Test={len(test)}"
         )
+
+    # Đảm bảo thứ tự thời gian tuyệt đối (train < validation < test)
+    if train["issue_date"].max() >= validation["issue_date"].min():
+        raise ValueError("Lỗi rò rỉ mốc thời gian: Tập Train trùng hoặc sau tập Validation.")
+    if validation["issue_date"].max() >= test["issue_date"].min():
+        raise ValueError("Lỗi rò rỉ mốc thời gian: Tập Validation trùng hoặc sau tập Test.")
 
     return train, validation, test
 
