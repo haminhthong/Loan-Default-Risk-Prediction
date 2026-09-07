@@ -1,26 +1,28 @@
-# Model Card: Loan Default Risk Decision Support Platform
+# Model Card: Funded-Loan Lifetime Charge-Off Risk Scoring
 
 ## Intended Use
 
-Hệ thống hỗ trợ ra quyết định tín dụng (**Decision Support System**) ước lượng xác suất vỡ nợ `Charged Off` tại thời điểm cấp khoản vay. Không tự động phê duyệt, từ chối hoặc ấn định lãi suất vay.
+Hệ thống ước lượng `lifetime_chargeoff_probability` cho các hồ sơ giống khoản vay
+đã được cấp vốn trong dữ liệu LendingClub lịch sử. Đây là risk scoring và hỗ trợ
+manual review; hệ thống không tự động phê duyệt, từ chối hoặc ấn định lãi suất.
 
 ## Model & Architecture Alignment (8 Canonical Stages)
 
-- **Champion Model**: Logistic Regression kết hợp Platt Sigmoid Calibration (bảo toàn thứ tự thời gian).
-- **Temporal Protocol**: 
-  - Train: Dữ liệu trước 2011 (với 3-fold Expanding-Window Temporal CV).
-  - Validation: Nửa đầu năm 2011 (H1/2011) - dùng để tối ưu ngưỡng quyết định chi phí (FN:FP = 5:1 -> 0.14).
-  - Test: Nửa cuối năm 2011 (H2/2011 Out-of-Time Test).
-- **Champion Selection Policy**: Artifact sản xuất áp dụng chế độ `CHAMPION_INCLUDE_PRICING = False` (`no_int_sub`), chủ động loại bỏ `int_rate` và `sub_grade`. Mô hình `no_int_sub` vừa tuân thủ quy tắc Quản trị Mô hình (Governance Constraints) để tránh học lại chính sách định giá quá khứ, vừa đạt hiệu năng thực nghiệm vượt trội (PR-AUC 0.3384 so với 0.3366 của bản `all` trên tập Out-of-Time Test).
+- **Base model**: L2 Logistic Regression, `class_weight=None`, tune `C` bằng expanding-window CV trong Train.
+- **Calibration**: Sigmoid calibration fit riêng trên Calibration block; không dùng Locked Test.
+- **Temporal Protocol**: Train `< 2011-01-01`, Calibration `2011 Q1`, Policy Validation `2011 Q2`, Locked Test `>= 2011-07-01`.
+- **Feature contract**: `application-risk-v2`, loại `int_rate`, `grade`, `sub_grade`, `installment`, `addr_state` và `issue_month` khỏi production score.
+- **Decision policy**: `manual-review-capacity-v1`, xếp hạng probability giảm dần và chọn tối đa 20% hồ sơ vào hàng đợi manual review.
 
 ## Scope & Operational Boundary
 
-- **Phạm vi mô hình**: Ước lượng xác suất rủi ro vỡ nợ (PD-like risk). Mô hình chưa trực tiếp ước tính Dư nợ tại thời điểm vỡ nợ (EAD) hay Tỷ lệ tổn thất khi vỡ nợ (LGD).
-- **Phân tách tầng quyết định**: Xác suất PD được trả về kèm theo Phân hạng rủi ro (`LOW`, `MEDIUM`, `HIGH`). Cờ báo động (`flag_for_review`) là một tầng chính sách vận hành độc lập nằm phía sau xác suất PD.
+- **Target**: `Charged Off = 1`, `Fully Paid = 0`; khoản vay chưa đủ `issue_date + term <= dataset_as_of_date` là `CENSORED` và không vào train/test.
+- **Population**: `P(Charged Off | Funded Loan)`, không phải xác suất trên mọi applicant chưa qua underwriting.
+- **Phân tách tầng quyết định**: Model trả probability và model factors; policy riêng tạo `review_required`. Không có output approve/reject.
 
 ## Hạn Chế & Cảnh Báo Vận Hành
 
-- Out-of-time test chỉ bao phủ giai đoạn lịch sử 2007-2011 trên dữ liệu LendingClub.
-- Giả định chi phí 5:1 chỉ đại diện cho một kịch bản độ nhạy chi phí, không thay thế tính toán Expected Loss tài chính thực tế.
-- Phân tích độ ổn định theo phân khúc (grade, home_ownership, addr_state) phục vụ kiểm định hiệu năng (Performance Stability), không thay thế kiểm định công bằng (Fairness Audit) trên thuộc tính nhạy cảm.
-- Cần giám sát định kỳ biến động phân phối (PSI / Data Drift) và thiết lập cơ chế kiểm soát theo nhóm tháng phát hành (Cohort Maturity Window).
+- Out-of-time test chỉ đại diện cho snapshot lịch sử; không tự động suy rộng sang portfolio mới.
+- Capacity 20% là operating policy, không phải ngưỡng tổn thất tài chính hay quyết định cấp tín dụng.
+- Local factors là đóng góp của model, không chứng minh quan hệ nhân quả và không phải adverse-action notice chính thức.
+- Performance chỉ tính trên cohort đã mature; cohort chưa mature chỉ được theo dõi missingness, category drift và score drift.

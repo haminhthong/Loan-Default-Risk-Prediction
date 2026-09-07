@@ -50,7 +50,6 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
     with col1:
         loan_amnt = st.number_input("Số tiền xin vay (USD)", min_value=500, max_value=40000, value=10000, step=500)
         term = st.selectbox("Kỳ hạn vay", options=["36 months", "60 months"], index=0)
-        installment = st.number_input("Số tiền trả góp hàng tháng (USD)", min_value=10.0, max_value=2000.0, value=334.54, step=10.0)
 
     with col2:
         annual_inc = st.number_input("Tổng thu nhập hàng năm (USD)", min_value=5000, max_value=500000, value=60000, step=2500)
@@ -59,7 +58,6 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
         verification_status = st.selectbox("Xác minh thu nhập", options=["Verified", "Source Verified", "Not Verified"], index=0)
 
     with col3:
-        grade = st.selectbox("Hạng tín dụng gốc (Grade)", options=["A", "B", "C", "D", "E", "F", "G"], index=1)
         purpose = st.selectbox(
             "Mục đích sử dụng khoản vay",
             options=["debt_consolidation", "credit_card", "home_improvement", "major_purchase", "small_business", "other"],
@@ -89,8 +87,6 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
         single_record = {
             "loan_amnt": loan_amnt,
             "term": term,
-            "installment": installment,
-            "grade": grade,
             "emp_length": emp_length,
             "home_ownership": home_ownership,
             "annual_inc": annual_inc,
@@ -106,14 +102,19 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
             "revol_util": f"{revol_util_num:.2f}%",
             "total_acc": total_acc,
             "earliest_cr_line": "Jan-00",
-            "issue_d": "Dec-11",
         }
 
         input_df = pd.DataFrame([single_record])
         pred_res = predict(input_df, artifact)
-        prob = float(pred_res.iloc[0]["default_probability"])
-        pred_label = int(pred_res.iloc[0]["default_prediction"])
-        threshold = float(artifact["threshold"])
+        probability_column = (
+            "lifetime_chargeoff_probability"
+            if "lifetime_chargeoff_probability" in pred_res.columns
+            else "default_probability"
+        )
+        review_column = "review_required" if "review_required" in pred_res.columns else "default_prediction"
+        prob = float(pred_res.iloc[0][probability_column])
+        review_required = bool(pred_res.iloc[0][review_column])
+        threshold = float(artifact.get("policy", {}).get("threshold", artifact.get("threshold", 0.5)))
 
         st.markdown("### 📊 Kết Quả Đánh Giá Rủi Ro Tín Dụng")
 
@@ -124,9 +125,9 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
             st.metric("Ngưỡng cảnh báo chi phí tối ưu", f"{threshold * 100:.2f}%")
 
         with res_col2:
-            if pred_label == 1:
-                st.error("🚨 **CẢNH BÁO RỦI RO VỠ NỢ CAO (HIGH RISK)**")
-                st.warning("Xác suất vượt ngưỡng minh họa. Kết quả không thay thế thẩm định tín dụng của con người.")
+            if review_required:
+                st.error("🚨 **HỒ SƠ ĐƯỢC ĐỀ XUẤT MANUAL REVIEW**")
+                st.warning("Đây là tín hiệu hỗ trợ thẩm định, không phải quyết định approve/reject.")
             else:
                 st.success("✅ **MỨC CẢNH BÁO THẤP (LOWER RISK FLAG)**")
                 st.info("Kết quả chỉ là điểm rủi ro mô hình, không phải quyết định phê duyệt khoản vay.")
@@ -182,7 +183,8 @@ def render_batch_tab(artifact: dict[str, Any]) -> None:
             st.success("✅ Đã hoàn tất chấm điểm hàng loạt!")
 
             # Thống kê nhanh kết quả
-            high_risk_count = (result_df["default_prediction"] == 1).sum()
+            review_column = "review_required" if "review_required" in result_df.columns else "default_prediction"
+            high_risk_count = result_df[review_column].astype(bool).sum()
             total_count = len(result_df)
             high_risk_pct = (high_risk_count / total_count) * 100
 
@@ -225,9 +227,9 @@ def render_diagnostics_tab(artifact: dict[str, Any]) -> None:
     st.markdown(
         """
         - **Point-in-Time Features**: Chỉ sử dụng các thuộc tính có sẵn trước lúc giải ngân.
-        - **Temporal Out-of-Time Split**: Train (trước 2011), Validation (T1-T6/2011), Test (T7-T12/2011).
-        - **Cost-Sensitive Thresholding**: Ngưỡng được tối ưu với tỷ lệ chi phí FN:FP = 5:1.
-        - **Probability Calibration**: Hiệu chỉnh Sigmoid giúp xác suất dự báo sát với tỷ lệ nợ xấu thực tế.
+        - **Temporal blocks**: Train → Calibration → Policy Validation → Locked Test.
+        - **Capacity policy**: Chọn tối đa 20% hồ sơ có calibrated risk cao nhất để manual review.
+        - **Model factors**: Đóng góp Logistic Regression, không phải rule reason code hay causal explanation.
         """
     )
 

@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 
 # Phiên bản hợp đồng đặc trưng và hợp đồng nhãn mục tiêu (Feature & Target Contracts)
-FEATURE_CONTRACT_VERSION = "loan-origination-v1"
-TARGET_CONTRACT_VERSION = "charged-off-v1"
+FEATURE_CONTRACT_VERSION = "application-risk-v2"
+TARGET_CONTRACT_VERSION = "lifetime-chargeoff-v1"
 
 # Tên cột nhãn mục tiêu trong mô hình
 TARGET = "default_flag"
@@ -263,3 +263,169 @@ def derive_reason_codes(row: pd.Series | dict) -> list[str]:
     return reasons if reasons else ["GENERAL_CREDIT_RISK"]
 
 
+# ---------------------------------------------------------------------------
+# Hợp đồng production: application-risk-v2.
+# ---------------------------------------------------------------------------
+
+from src.data import add_maturity_columns
+
+FEATURE_CONTRACT_VERSION = "application-risk-v2"
+TARGET_CONTRACT_VERSION = "lifetime-chargeoff-v1"
+
+APPLICATION_FEATURE_COLUMNS = [
+    "loan_amnt",
+    "term_months",
+    "emp_length_years",
+    "home_ownership",
+    "log_annual_income",
+    "verification_status",
+    "purpose",
+    "dti",
+    "delinq_2yrs",
+    "inq_last_6mths",
+    "open_acc",
+    "pub_rec",
+    "revol_bal",
+    "revolving_utilization",
+    "total_acc",
+    "credit_history_years",
+]
+
+EXCLUDED_POLICY_FEATURES = [
+    "int_rate",
+    "interest_rate",
+    "grade",
+    "sub_grade",
+    "installment",
+    "installment_income_ratio",
+    "addr_state",
+    "issue_month",
+]
+
+
+def create_target(
+    data: pd.DataFrame,
+    dataset_as_of_date: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Tạo lifetime charge-off target sau maturity gate.
+
+    Khi không truyền snapshot date, hàm giữ hành vi legacy để hỗ trợ notebook
+    cũ. Pipeline huấn luyện production luôn truyền date từ manifest; nếu thiếu
+    date, training sẽ dừng trước khi gọi hàm này.
+    """
+    dataset_as_of_date = dataset_as_of_date or data.attrs.get("dataset_as_of_date")
+    if dataset_as_of_date is None:
+        final_loans = data.loc[data["loan_status"].isin(FINAL_STATUS_MAP)].copy()
+    else:
+        matured = add_maturity_columns(data, dataset_as_of_date)
+        final_loans = matured.loc[
+            (matured["outcome_maturity_status"] == "MATURE")
+            & matured["loan_status"].isin(FINAL_STATUS_MAP)
+        ].copy()
+
+    final_loans[TARGET] = final_loans["loan_status"].map(FINAL_STATUS_MAP).astype("int8")
+    final_loans.attrs["target_contract"] = {
+        "version": TARGET_CONTRACT_VERSION,
+        "population": "historical_funded_loans",
+        "positive_event": "Charged Off",
+        "negative_event": "Fully Paid",
+        "horizon": "contractual_loan_lifetime",
+        "maturity_rule": "issue_date + term <= dataset_as_of_date",
+    }
+    return final_loans
+
+
+def _parse_emp_length_years(series: pd.Series) -> pd.Series:
+    """Chuyển ``emp_length`` về số năm; giá trị thiếu được giữ là NaN."""
+    text = series.astype("string").str.lower().str.strip()
+    years = pd.to_numeric(text.str.extract(r"(\d+)", expand=False), errors="coerce")
+    years = years.mask(text.str.contains("<", na=False), 0.5)
+    return years.astype("float64")
+
+
+def _canonical_application_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Tạo đúng 16 trường application/credit-history của production contract."""
+    source = data.copy()
+    if "issue_date" not in source.columns and "issue_d" in source.columns:
+        source["issue_date"] = pd.to_datetime(
+            source["issue_d"], format="%b-%y", errors="coerce"
+        )
+
+    features = pd.DataFrame(index=source.index)
+    features["loan_amnt"] = pd.to_numeric(source.get("loan_amnt"), errors="coerce")
+    if "term_months" in source.columns:
+        features["term_months"] = pd.to_numeric(source["term_months"], errors="coerce")
+    elif "term" in source.columns:
+        features["term_months"] = pd.to_numeric(
+            source["term"].astype("string").str.extract(r"(\d+)", expand=False),
+            errors="coerce",
+        )
+    else:
+        features["term_months"] = np.nan
+
+    features["emp_length_years"] = (
+        _parse_emp_length_years(source["emp_length"])
+        if "emp_length" in source.columns
+        else np.nan
+    )
+    features["home_ownership"] = source.get(
+        "home_ownership", pd.Series(np.nan, index=source.index)
+    )
+    annual_income = pd.to_numeric(source.get("annual_inc"), errors="coerce")
+    features["log_annual_income"] = np.log1p(annual_income.clip(lower=0))
+    features["verification_status"] = source.get(
+        "verification_status", pd.Series(np.nan, index=source.index)
+    )
+    features["purpose"] = source.get("purpose", pd.Series(np.nan, index=source.index))
+    for column in ("dti", "delinq_2yrs", "inq_last_6mths", "open_acc", "pub_rec", "revol_bal", "total_acc"):
+        features[column] = pd.to_numeric(
+            source.get(column, pd.Series(np.nan, index=source.index)),
+            errors="coerce",
+        )
+
+    if "revol_util" in source.columns:
+        features["revolving_utilization"] = _parse_percentage(source["revol_util"])
+    else:
+        features["revolving_utilization"] = np.nan
+
+    if "earliest_cr_line" in source.columns and "issue_date" in source.columns:
+        earliest = pd.to_datetime(
+            source["earliest_cr_line"], format="%b-%y", errors="coerce"
+        )
+        issue_date = pd.to_datetime(source["issue_date"], errors="coerce")
+        earliest = earliest.where(earliest <= issue_date, earliest - pd.DateOffset(years=100))
+        features["credit_history_years"] = (issue_date - earliest).dt.days / 365.25
+    else:
+        features["credit_history_years"] = np.nan
+
+    return features.reindex(columns=APPLICATION_FEATURE_COLUMNS)
+
+
+# Giữ implementation cũ cho các notebook/fixture legacy; production không gọi
+# nó vì canonical train truyền include_pricing=False.
+_legacy_build_features = build_features
+
+
+def build_features(
+    data: pd.DataFrame,
+    include_pricing: bool | str = True,
+) -> pd.DataFrame:
+    """Tạo feature matrix; ``False`` là application-risk-v2 production.
+
+    Các mode chuỗi còn lại chỉ phục vụ diagnostic/ablation trong tập phát triển,
+    tuyệt đối không được dùng để chạm vào Locked Test.
+    """
+    if include_pricing is False or include_pricing == "application-risk-v2":
+        features = _canonical_application_features(data)
+        unexpected_leakage = LEAKAGE_COLUMNS.intersection(features.columns)
+        if unexpected_leakage:
+            raise ValueError(
+                f"Phát hiện cột hậu nghiệm trong application-risk-v2: {sorted(unexpected_leakage)}"
+            )
+        return features
+    return _legacy_build_features(data, include_pricing=include_pricing)
+
+
+def build_application_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Tên rõ nghĩa cho caller production; tương đương ``include_pricing=False``."""
+    return build_features(data, include_pricing=False)

@@ -106,7 +106,7 @@ class DecisionSupport(BaseModel):
 
     flag_for_review: bool = Field(..., description="Cờ cảnh báo phát tín hiệu xem xét thủ công")
     threshold: float = Field(..., description="Ngưỡng chi phí/năng lực được áp dụng")
-    policy: str = Field(default="FN5_FP1_COST_SENSITIVE", description="Tên chính sách quyết định chi phí")
+    policy: str = Field(default="manual-review-capacity-v1", description="Legacy policy alias")
 
 
 class ScorePredictionResult(BaseModel):
@@ -124,8 +124,8 @@ class ModelContractMetadata(BaseModel):
 
     model_name: str = Field(..., description="Tên mô hình Champion")
     model_version: str = Field(default="1.0.0", description="Phiên bản mô hình")
-    feature_contract_version: str = Field(default="loan-origination-v1", description="Phiên bản hợp đồng đặc trưng")
-    target_contract_version: str = Field(default="charged-off-v1", description="Phiên bản hợp đồng nhãn mục tiêu")
+    feature_contract_version: str = Field(default="application-risk-v2", description="Phiên bản hợp đồng đặc trưng")
+    target_contract_version: str = Field(default="lifetime-chargeoff-v1", description="Phiên bản hợp đồng nhãn mục tiêu")
 
 
 class ScoreResponse(BaseModel):
@@ -171,8 +171,8 @@ def model_info() -> dict[str, Any]:
     return {
         "model_name": artifact.get("model_name"),
         "model_version": artifact.get("model_version", "1.0.0"),
-        "feature_contract_version": artifact.get("feature_contract_version", "loan-origination-v1"),
-        "target_contract_version": artifact.get("target_contract_version", "charged-off-v1"),
+        "feature_contract_version": artifact.get("feature_contract_version", "application-risk-v2"),
+        "target_contract_version": artifact.get("target_contract_version", "lifetime-chargeoff-v1"),
         "threshold": artifact.get("threshold"),
         "metrics": artifact.get("metrics"),
         "data_rows": artifact.get("data_rows"),
@@ -220,7 +220,7 @@ def score(payload: ScoreRequest) -> ScoreResponse:
                 decision_support=DecisionSupport(
                     flag_for_review=bool(pred_flag == 1),
                     threshold=thresh,
-                    policy="FN5_FP1_COST_SENSITIVE",
+                    policy="manual-review-capacity-v1",
                 ),
                 reason_codes=reasons,
             )
@@ -229,8 +229,8 @@ def score(payload: ScoreRequest) -> ScoreResponse:
     contract_meta = ModelContractMetadata(
         model_name=artifact.get("model_name", "Logistic Regression"),
         model_version=artifact.get("model_version", "1.0.0"),
-        feature_contract_version=artifact.get("feature_contract_version", "loan-origination-v1"),
-        target_contract_version=artifact.get("target_contract_version", "charged-off-v1"),
+        feature_contract_version=artifact.get("feature_contract_version", "application-risk-v2"),
+        target_contract_version=artifact.get("target_contract_version", "lifetime-chargeoff-v1"),
     )
 
     return ScoreResponse(
@@ -258,3 +258,213 @@ def explain() -> dict[str, Any]:
         "top_features": odds_df.to_dict(orient="records"),
     }
 
+
+# ---------------------------------------------------------------------------
+# API contract v1.0.0: scoring độc lập với manual-review queue.
+# ---------------------------------------------------------------------------
+
+class LoanApplication(BaseModel):
+    """Schema application-only; các field pricing/policy cũ chỉ nhận tạm thời và bị bỏ qua."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    loan_amnt: float = Field(..., gt=0)
+    term_months: int | None = Field(default=None, ge=1, le=120)
+    # Deprecated compatibility: chuẩn hóa về term_months rồi không đưa vào model ngoài term.
+    term: Literal["36 months", "60 months"] | None = Field(default=None, deprecated=True)
+    emp_length: str | None = None
+    home_ownership: Literal["RENT", "OWN", "MORTGAGE", "OTHER"]
+    annual_inc: float = Field(..., gt=0)
+    verification_status: Literal["Verified", "Source Verified", "Not Verified"]
+    purpose: str
+    dti: float | None = Field(default=None, ge=0, le=100)
+    delinq_2yrs: float | None = Field(default=None, ge=0)
+    inq_last_6mths: float | None = Field(default=None, ge=0)
+    open_acc: float | None = Field(default=None, ge=0)
+    pub_rec: float | None = Field(default=None, ge=0)
+    revol_bal: float | None = Field(default=None, ge=0)
+    revol_util: str | None = None
+    total_acc: float | None = Field(default=None, ge=0)
+    earliest_cr_line: str | None = None
+
+    # Các trường sau không thuộc application-risk-v2; chỉ giữ để client cũ có
+    # thời gian migrate, tuyệt đối không được dùng khi build feature production.
+    installment: float | None = Field(default=None, deprecated=True)
+    grade: str | None = Field(default=None, deprecated=True)
+    addr_state: str | None = Field(default=None, deprecated=True)
+    issue_d: str | None = Field(default=None, deprecated=True)
+
+    @model_validator(mode="after")
+    def validate_term(self) -> "LoanApplication":
+        if self.term_months is None and self.term is None:
+            raise ValueError("Cần cung cấp term_months hoặc term.")
+        if self.term_months is not None and self.term_months not in (36, 60):
+            raise ValueError("term_months chỉ nhận 36 hoặc 60.")
+        return self
+
+
+class ScoreRequest(BaseModel):
+    """Batch scoring; queue manual review được xử lý ở job riêng."""
+
+    records: list[LoanApplication] = Field(..., min_length=1, max_length=1000)
+
+
+class RiskScore(BaseModel):
+    lifetime_chargeoff_probability: float = Field(..., ge=0, le=1)
+    risk_band: Literal["LOW", "MEDIUM", "HIGH"]
+
+
+class DecisionSupport(BaseModel):
+    review_required: bool
+    flag_for_review: bool | None = Field(default=None, deprecated=True)
+    threshold: float = Field(..., ge=0, le=1)
+    policy_version: str
+    maximum_review_rate: float = Field(..., gt=0, le=1)
+
+
+class ScorePredictionResult(BaseModel):
+    lifetime_chargeoff_probability: float = Field(..., ge=0, le=1)
+    risk: RiskScore
+    review_required: bool
+    decision_support: DecisionSupport
+    model_factors: list[dict[str, Any]] = Field(default_factory=list)
+    scored_at: str
+    # Deprecated aliases cho client cũ; không dùng trong policy/model contract.
+    default_probability: float | None = Field(default=None, deprecated=True)
+    default_prediction: int | None = Field(default=None, deprecated=True)
+    reason_codes: list[str] | None = Field(default=None, deprecated=True)
+
+
+class ModelContractMetadata(BaseModel):
+    model_name: str
+    model_version: str
+    feature_contract_version: str
+    target_contract_version: str
+
+
+class ScoreResponse(BaseModel):
+    model: ModelContractMetadata
+    model_metadata: ModelContractMetadata | None = Field(default=None, deprecated=True)
+    scope: dict[str, str]
+    predictions: list[ScorePredictionResult]
+
+
+app = FastAPI(
+    title="Funded-Loan Lifetime Charge-Off Risk Scoring API",
+    description=(
+        "Chấm điểm lifetime charge-off probability cho funded-loan-like applications. "
+        "API không tự động approve/reject khoản vay."
+    ),
+    version="1.0.0",
+)
+
+
+@app.get("/health", summary="Kiểm tra trạng thái hệ thống")
+def health_v2() -> dict[str, Any]:
+    """Không trả đường dẫn nội bộ; chỉ báo trạng thái artifact."""
+    return {"status": "ok" if MODEL_PATH.exists() else "model_missing", "model_loaded": MODEL_PATH.exists()}
+
+
+@app.get("/info", summary="Truy vấn model contract", dependencies=[Depends(verify_api_key)])
+def model_info_v2() -> dict[str, Any]:
+    """Trả metadata contract và policy đang được load."""
+    if not MODEL_PATH.exists():
+        raise HTTPException(status_code=503, detail="Chưa tìm thấy model artifact.")
+    try:
+        artifact = get_artifact()
+    except ArtifactError as err:
+        raise HTTPException(status_code=503, detail=f"Lỗi nạp model: {err}") from err
+    return {
+        "model": {
+            "name": artifact.get("model_name"),
+            "version": artifact.get("model_version", "1.0.0"),
+            "feature_contract": artifact.get("feature_contract_version"),
+            "target_contract": artifact.get("target_contract_version"),
+        },
+        "scope": artifact.get("scope", {}),
+        "policy": artifact.get("policy", {}),
+        "metrics": artifact.get("metrics", {}),
+        "split_rows": artifact.get("split_rows", {}),
+    }
+
+
+def _record_to_model_input(record: LoanApplication) -> dict[str, Any]:
+    """Chuẩn hóa schema API về dạng mà feature builder hiểu."""
+    values = record.model_dump(exclude_none=True)
+    term_months = values.pop("term_months", None)
+    if term_months is not None:
+        values["term"] = f"{term_months} months"
+    # Không truyền các field pricing/policy vào canonical builder.
+    for field in ("installment", "grade", "addr_state", "issue_d"):
+        values.pop(field, None)
+    return values
+
+
+@app.post("/score", response_model=ScoreResponse, summary="Chấm lifetime charge-off risk", dependencies=[Depends(verify_api_key)])
+def score_v2(payload: ScoreRequest) -> ScoreResponse:
+    """Trả probability và factor của model; không trả quyết định approve/reject."""
+    if not MODEL_PATH.exists():
+        raise HTTPException(status_code=503, detail="Chưa có model artifact. Hãy chạy pipeline huấn luyện.")
+    try:
+        artifact = get_artifact()
+        input_df = pd.DataFrame([_record_to_model_input(record) for record in payload.records])
+        predictions_df = predict(input_df, artifact)
+    except ArtifactError as err:
+        raise HTTPException(status_code=503, detail=f"Lỗi model artifact: {err}") from err
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Dữ liệu không hợp lệ: {exc}") from exc
+
+    policy = artifact.get("policy", {})
+    threshold = float(policy.get("threshold", artifact.get("threshold", 0.5)))
+    max_review_rate = float(policy.get("maximum_review_rate", 0.20))
+    predictions = []
+    for _, row in predictions_df.iterrows():
+        probability = float(row.get("lifetime_chargeoff_probability", row.get("default_probability")))
+        review_required = bool(row.get("review_required", row.get("default_prediction", False)))
+        factors = row.get("top_risk_factors", [])
+        predictions.append(
+            ScorePredictionResult(
+                lifetime_chargeoff_probability=probability,
+                risk=RiskScore(
+                    lifetime_chargeoff_probability=probability,
+                    risk_band=str(row["risk_band"]),
+                ),
+                review_required=review_required,
+                decision_support=DecisionSupport(
+                    review_required=review_required,
+                    flag_for_review=review_required,
+                    threshold=threshold,
+                    policy_version=str(policy.get("version", "manual-review-capacity-v1")),
+                    maximum_review_rate=max_review_rate,
+                ),
+                model_factors=list(factors),
+                scored_at=str(row.get("scored_at")),
+                default_probability=probability,
+                default_prediction=int(review_required),
+                reason_codes=[],
+            )
+        )
+    contract = ModelContractMetadata(
+            model_name=artifact.get("model_name", "calibrated_logistic_regression"),
+            model_version=artifact.get("model_version", "1.0.0"),
+            feature_contract_version=artifact.get("feature_contract_version", "application-risk-v2"),
+            target_contract_version=artifact.get("target_contract_version", "lifetime-chargeoff-v1"),
+        )
+    return ScoreResponse(
+        model=contract,
+        model_metadata=contract,
+        scope=artifact.get("scope", {}),
+        predictions=predictions,
+    )
+
+
+@app.get("/explain", summary="Xem global logistic odds ratios", dependencies=[Depends(verify_api_key)])
+def explain_v2() -> dict[str, Any]:
+    """Global coefficients khác với local model factors của endpoint /score."""
+    odds_path = ROOT / "reports" / "logistic_odds_ratios.csv"
+    if not odds_path.exists():
+        raise HTTPException(status_code=404, detail="Chưa có báo cáo logistic_odds_ratios.csv.")
+    return {
+        "description": "Global odds ratio; không phải causal explanation và không phải adverse-action notice.",
+        "top_features": pd.read_csv(odds_path).to_dict(orient="records"),
+    }

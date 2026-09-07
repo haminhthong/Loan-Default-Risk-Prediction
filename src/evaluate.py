@@ -416,3 +416,115 @@ def compute_calibration_diagnostics(
         "calibration_slope": slope,
     }
 
+
+# ---------------------------------------------------------------------------
+# Decision policy production: capacity-constrained manual review.
+# ---------------------------------------------------------------------------
+
+def _top_k_mask(probabilities, review_rate: float) -> np.ndarray:
+    """Chọn đúng top-K score cao nhất bằng thứ tự ổn định."""
+    if not 0 < review_rate <= 1:
+        raise ValueError("review_rate phải nằm trong khoảng (0, 1].")
+    probabilities = np.asarray(probabilities, dtype=float)
+    n_review = int(np.floor(len(probabilities) * review_rate))
+    if len(probabilities) and n_review == 0:
+        n_review = 1
+    order = np.argsort(-probabilities, kind="mergesort")
+    mask = np.zeros(len(probabilities), dtype=bool)
+    mask[order[:n_review]] = True
+    return mask
+
+
+def capture_at_k(y_true, probabilities, review_rate: float = 0.20) -> float:
+    """Tỷ lệ Charged Off nằm trong nhóm top-K rủi ro."""
+    y_arr = np.asarray(y_true)
+    if y_arr.sum() == 0:
+        return 0.0
+    return float(y_arr[_top_k_mask(probabilities, review_rate)].sum() / y_arr.sum())
+
+
+def precision_at_k(y_true, probabilities, review_rate: float = 0.20) -> float:
+    """Precision của nhóm hồ sơ được đưa vào manual review."""
+    mask = _top_k_mask(probabilities, review_rate)
+    return float(np.asarray(y_true)[mask].mean()) if mask.any() else 0.0
+
+
+def lift_at_k(y_true, probabilities, review_rate: float = 0.20) -> float:
+    """Lift của nhóm top-K so với tỷ lệ Charged Off toàn bộ tập."""
+    y_arr = np.asarray(y_true)
+    prevalence = float(y_arr.mean()) if len(y_arr) else 0.0
+    return precision_at_k(y_arr, probabilities, review_rate) / prevalence if prevalence else 0.0
+
+
+def fit_capacity_policy(
+    probabilities,
+    max_review_rate: float = 0.20,
+) -> dict[str, float | str]:
+    """Đóng băng policy từ Calibration/Policy Validation, không dùng Test."""
+    probabilities = np.asarray(probabilities, dtype=float)
+    mask = _top_k_mask(probabilities, max_review_rate)
+    threshold = float(np.min(probabilities[mask])) if mask.any() else 1.0
+    return {
+        "version": "manual-review-capacity-v1",
+        "type": "capacity_constrained",
+        "maximum_review_rate": float(max_review_rate),
+        "selection": "highest_calibrated_risk_first",
+        "threshold": threshold,
+        "risk_band_bounds": {"low_max": 0.10, "medium_max": 0.25},
+    }
+
+
+def apply_review_policy(probabilities, policy: dict) -> np.ndarray:
+    """Áp policy theo top-K; phù hợp batch queue hơn threshold cố định."""
+    maximum_rate = float(policy.get("maximum_review_rate", 0.20))
+    return _top_k_mask(probabilities, maximum_rate)
+
+
+def choose_capacity_constrained_threshold(
+    y_true,
+    probabilities,
+    max_review_rate: float = 0.20,
+) -> tuple[float, pd.DataFrame]:
+    """API tương thích cũ nhưng chọn threshold theo capacity, không theo cost giả."""
+    policy = fit_capacity_policy(probabilities, max_review_rate)
+    mask = apply_review_policy(probabilities, policy)
+    y_arr = np.asarray(y_true)
+    table = pd.DataFrame(
+        [
+            {
+                "threshold": policy["threshold"],
+                "review_rate": float(mask.mean()) if len(mask) else 0.0,
+                "recall": float(y_arr[mask].sum() / y_arr.sum()) if y_arr.sum() else 0.0,
+                "precision": float(y_arr[mask].mean()) if mask.any() else 0.0,
+            }
+        ]
+    )
+    return float(policy["threshold"]), table
+
+
+def classification_metrics(y_true, probabilities, threshold: float) -> dict[str, float]:
+    """Tính metric ranking, calibration và capture@10/20 trên một tập cố định."""
+    y_arr = np.asarray(y_true)
+    p_arr = np.asarray(probabilities, dtype=float)
+    prediction = (p_arr >= threshold).astype(int)
+    default_prev = float(np.mean(y_arr)) if len(y_arr) else 0.0
+    pr_auc_val = float(average_precision_score(y_arr, p_arr))
+    roc_auc_val = float(roc_auc_score(y_arr, p_arr)) if np.unique(y_arr).size > 1 else 0.5
+    return {
+        "pr_auc": pr_auc_val,
+        "default_prevalence": default_prev,
+        "pr_auc_lift": compute_pr_auc_lift(pr_auc_val, default_prev),
+        "roc_auc": roc_auc_val,
+        "gini": compute_gini(roc_auc_val),
+        "ks_statistic": compute_ks_statistic(y_arr, p_arr),
+        "f1": float(f1_score(y_arr, prediction, zero_division=0)),
+        "recall": float(recall_score(y_arr, prediction, zero_division=0)),
+        "precision": float(precision_score(y_arr, prediction, zero_division=0)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_arr, prediction)),
+        "brier_score": float(brier_score_loss(y_arr, p_arr)),
+        "review_rate": float(np.mean(prediction)) if len(prediction) else 0.0,
+        "capture_at_10": capture_at_k(y_arr, p_arr, 0.10),
+        "capture_at_20": capture_at_k(y_arr, p_arr, 0.20),
+        "precision_at_20": precision_at_k(y_arr, p_arr, 0.20),
+        "lift_at_20": lift_at_k(y_arr, p_arr, 0.20),
+    }

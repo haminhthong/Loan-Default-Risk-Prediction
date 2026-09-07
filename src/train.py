@@ -3,7 +3,7 @@ Mô-đun Huấn Luyện Pipeline Machine Learning Dự Báo Rủi Ro Vỡ Nợ (
 
 Quy trình thực hiện theo 8 giai đoạn chuẩn Platform:
 1. Data Ingestion & Label Maturity Check (Outcome Maturity Gate).
-2. Point-in-Time Feature Contract (loan-origination-v1) & Leakage Denylist.
+2. Point-in-Time Feature Contract (application-risk-v2) & Leakage Denylist.
 3. Feature Engineering (applicant, credit history, derived metrics).
 4. Temporal Development Protocol (Train < 2011, Val 2011 H1, Test 2011 H2 + 3-fold Temporal CV).
 5. Model Development & Champion Selection Policy (Governance Constraints over pure PR-AUC).
@@ -387,7 +387,7 @@ def train(
     )
     calibrated_pipeline.fit(X_train, y_train)
 
-    # 6. Chọn ngưỡng quyết định tối ưu trên tập Validation dựa theo chi phí nghiệp vụ (FN:FP = 5:1)
+# 6. Legacy implementation; canonical train bên dưới freeze capacity policy trên Policy Validation.
     val_prob = calibrated_pipeline.predict_proba(X_validation)[:, 1]
     optimal_threshold, _ = choose_threshold(y_validation, val_prob)
 
@@ -559,6 +559,340 @@ def main() -> None:
     print("==================================================\n")
 
 
+# Entry point được khai báo lại ở cuối file sau implementation canonical bên dưới.
+
+
+# ---------------------------------------------------------------------------
+# Canonical training lifecycle.
+# ---------------------------------------------------------------------------
+
+from src.data import read_manifest, temporal_split_four_blocks
+from src.evaluate import (
+    capture_at_k,
+    fit_capacity_policy,
+    lift_at_k,
+    precision_at_k,
+)
+from src.modeling import CalibratedRiskModel
+from src.features import APPLICATION_FEATURE_COLUMNS, EXCLUDED_POLICY_FEATURES
+
+CANONICAL_C_VALUES = (0.01, 0.1, 1.0, 10.0)
+MAX_REVIEW_RATE = 0.20
+
+
+def make_production_pipeline(
+    features: pd.DataFrame,
+    c_value: float = 1.0,
+    random_state: int = RANDOM_STATE,
+) -> Pipeline:
+    """Tạo L2 Logistic Regression production với class_weight=None."""
+    numeric_cols = features.select_dtypes(include="number").columns.tolist()
+    categorical_cols = features.select_dtypes(exclude="number").columns.tolist()
+    preprocessing = ColumnTransformer(
+        transformers=[
+            (
+                "numeric",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="median")),
+                        ("scale", StandardScaler()),
+                    ]
+                ),
+                numeric_cols,
+            ),
+            (
+                "categorical",
+                Pipeline(
+                    steps=[
+                        ("imputer", SimpleImputer(strategy="most_frequent")),
+                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
+                    ]
+                ),
+                categorical_cols,
+            ),
+        ],
+        remainder="drop",
+    )
+    estimator = LogisticRegression(
+        C=c_value,
+        class_weight=None,
+        solver="liblinear",
+        max_iter=2000,
+        random_state=random_state,
+    )
+    return Pipeline([("preprocess", preprocessing), ("model", estimator)])
+
+
+def tune_logistic_c(
+    train_data: pd.DataFrame,
+    features: pd.DataFrame,
+    target: pd.Series,
+    random_state: int = RANDOM_STATE,
+) -> pd.DataFrame:
+    """Tune duy nhất C bằng expanding-window CV trong Train."""
+    folds = build_temporal_cv(train_data["issue_date"])
+    rows = []
+    for c_value in CANONICAL_C_VALUES:
+        fold_scores = []
+        fold_roc_scores = []
+        for train_idx, validation_idx in folds:
+            model = make_production_pipeline(features.iloc[train_idx], c_value, random_state)
+            model.fit(features.iloc[train_idx], target.iloc[train_idx])
+            probability = model.predict_proba(features.iloc[validation_idx])[:, 1]
+            fold_scores.append(average_precision_score(target.iloc[validation_idx], probability))
+            fold_roc_scores.append(roc_auc_score(target.iloc[validation_idx], probability))
+        rows.append(
+            {
+                "model": "logistic_regression",
+                "C": c_value,
+                "pr_auc_mean": float(np.mean(fold_scores)) if fold_scores else 0.0,
+                "pr_auc_std": float(np.std(fold_scores)) if fold_scores else 0.0,
+                "roc_auc_mean": float(np.mean(fold_roc_scores)) if fold_roc_scores else 0.0,
+                "cv_folds": len(fold_scores),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(
+        ["pr_auc_mean", "C"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+
+def compare_feature_sets(
+    train_data: pd.DataFrame,
+    calibration_data: pd.DataFrame,
+) -> pd.DataFrame:
+    """Ablation chỉ chạy trên development blocks; tuyệt đối không nhận Test.
+
+    Bảng này dùng để kiểm tra feature contract và CV trong Train. Nó không được
+    dùng làm headline cho Locked Test và không được chọn champion theo Test.
+    """
+    modes = ["all", "no_int_sub", "no_int_sub_grade", "no_pricing_all"]
+    rows = []
+    for mode in modes:
+        x_train = build_features(train_data, include_pricing=mode)
+        x_calibration = build_features(calibration_data, include_pricing=mode)
+        y_train = train_data[TARGET]
+        y_calibration = calibration_data[TARGET]
+        cv = tune_logistic_c(train_data, x_train, y_train)
+        best_c = float(cv.iloc[0]["C"])
+        model = make_production_pipeline(x_train, best_c)
+        model.fit(x_train, y_train)
+        calibration_probability = model.predict_proba(x_calibration)[:, 1]
+        rows.append(
+            {
+                "feature_set_mode": mode,
+                "feature_count": x_train.shape[1],
+                "selected_C": best_c,
+                "cv_pr_auc": float(cv.iloc[0]["pr_auc_mean"]),
+                "calibration_pr_auc": float(
+                    average_precision_score(y_calibration, calibration_probability)
+                ),
+                "data_scope": "train_and_calibration_only",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _write_contract_files(output_path: Path, artifact: dict[str, Any]) -> None:
+    """Ghi contract tách rời để API/monitoring có thể audit độc lập model joblib."""
+    output_dir = output_path.parent
+    contracts = {
+        "target_contract.json": artifact["target_contract"],
+        "feature_schema.json": artifact["feature_schema"],
+        "review_policy.json": artifact["policy"],
+    }
+    for filename, content in contracts.items():
+        (output_dir / filename).write_text(
+            json.dumps(content, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
+def train(
+    data_path: Path,
+    output_path: Path,
+    report_dir: Path = Path("reports"),
+    random_state: int = RANDOM_STATE,
+    manifest_path: Path | None = None,
+) -> dict[str, Any]:
+    """Huấn luyện lifecycle chuẩn: Train -> Calibration -> Policy -> Test."""
+    manifest_path = manifest_path or data_path.parent.parent / "data_manifest.json"
+    manifest = read_manifest(manifest_path)
+    raw_data = load_data(data_path, manifest_path=manifest_path)
+    if int(manifest["raw_rows"]) != len(raw_data):
+        raise ValueError(
+            "Số dòng trong dataset không khớp raw_rows của manifest; "
+            "dừng để tránh train nhầm snapshot."
+        )
+    dataset_as_of_date = manifest["dataset_as_of_date"]
+    censoring_report = analyze_target_censoring(raw_data, dataset_as_of_date)
+    labeled = create_target(raw_data, dataset_as_of_date)
+    if labeled.empty:
+        raise ValueError("Maturity gate không còn khoản vay đủ điều kiện để huấn luyện.")
+
+    train_data, calibration_data, policy_data, test_data = temporal_split_four_blocks(labeled)
+    x_train = build_features(train_data, include_pricing=False)
+    x_calibration = build_features(calibration_data, include_pricing=False)
+    x_policy = build_features(policy_data, include_pricing=False)
+    x_test = build_features(test_data, include_pricing=False)
+    y_train = train_data[TARGET]
+    y_calibration = calibration_data[TARGET]
+    y_policy = policy_data[TARGET]
+    y_test = test_data[TARGET]
+
+    comparison = tune_logistic_c(train_data, x_train, y_train, random_state)
+    selected_c = float(comparison.iloc[0]["C"])
+    base_pipeline = make_production_pipeline(x_train, selected_c, random_state)
+    calibrated_model = CalibratedRiskModel(base_pipeline).fit(
+        x_train,
+        y_train,
+        x_calibration,
+        y_calibration,
+    )
+
+    # Chỉ Policy Validation được phép đóng băng manual-review policy.
+    policy_probability = calibrated_model.predict_proba(x_policy)[:, 1]
+    policy = fit_capacity_policy(policy_probability, MAX_REVIEW_RATE)
+    test_probability = calibrated_model.predict_proba(x_test)[:, 1]
+    threshold = float(policy["threshold"])
+    metrics = classification_metrics(y_test, test_probability, threshold)
+    metrics.update(
+        {
+            "capture_at_20": capture_at_k(y_test, test_probability, MAX_REVIEW_RATE),
+            "precision_at_20": precision_at_k(y_test, test_probability, MAX_REVIEW_RATE),
+            "lift_at_20": lift_at_k(y_test, test_probability, MAX_REVIEW_RATE),
+        }
+    )
+    decile_table = decile_reliability_table(y_test, test_probability)
+
+    metric_funcs = {
+        "pr_auc": average_precision_score,
+        "roc_auc": roc_auc_score,
+        "recall": lambda y, p: recall_score(y, p >= threshold, zero_division=0),
+        "precision": lambda y, p: precision_score(y, p >= threshold, zero_division=0),
+        "brier_score": brier_score_loss,
+    }
+    bootstrap_cis = {
+        metric_name: dict(
+            zip(
+                ("value", "ci_lower", "ci_upper"),
+                bootstrap_metric_ci(
+                    y_test,
+                    test_probability,
+                    metric_fn,
+                    n_bootstrap=500,
+                    random_state=random_state,
+                ),
+            )
+        )
+        for metric_name, metric_fn in metric_funcs.items()
+    }
+
+    slices = {
+        column: slice_metrics(test_data, y_test, test_probability, threshold, column)
+        for column in ("grade", "home_ownership", "addr_state")
+        if column in test_data.columns
+    }
+    explanation_pipeline = base_pipeline
+    feature_schema = {
+        "version": FEATURE_CONTRACT_VERSION,
+        "features": APPLICATION_FEATURE_COLUMNS,
+        "excluded_policy_features": EXCLUDED_POLICY_FEATURES,
+    }
+    target_contract = {
+        "version": TARGET_CONTRACT_VERSION,
+        "population": "historical_funded_loans",
+        "positive_event": "Charged Off",
+        "negative_event": "Fully Paid",
+        "horizon": "contractual_loan_lifetime",
+        "maturity_rule": "issue_date + term <= dataset_as_of_date",
+    }
+    extra_reports = {
+        "feature_set_comparison": compare_feature_sets(train_data, calibration_data),
+        "target_censoring_report": censoring_report,
+        "calibration_test": calibration_table(y_test, test_probability),
+        "decile_reliability": decile_table,
+        "drift_psi": drift_report(x_train, x_test),
+        "logistic_odds_ratios": logistic_odds_ratios(explanation_pipeline),
+    }
+    save_reports(report_dir, comparison, metrics, slices, extra_reports)
+
+    data_sha = hashlib.sha256(data_path.read_bytes()).hexdigest()
+    artifact = {
+        "pipeline": calibrated_model,
+        "base_pipeline": base_pipeline,
+        "calibrator": calibrated_model.calibrator,
+        "feature_columns": APPLICATION_FEATURE_COLUMNS,
+        "feature_schema": feature_schema,
+        "target_contract": target_contract,
+        "policy": policy,
+        "threshold": threshold,
+        "metrics": metrics,
+        "bootstrap_ci": bootstrap_cis,
+        "calibration_diagnostics": compute_calibration_diagnostics(y_test, test_probability),
+        "model_name": "calibrated_logistic_regression",
+        "model_version": "1.0.0",
+        "feature_contract_version": FEATURE_CONTRACT_VERSION,
+        "target_contract_version": TARGET_CONTRACT_VERSION,
+        "include_pricing_features": False,
+        "scope": {
+            "population": "historical_funded_loans",
+            "serving_population": "funded-loan-like applications",
+            "outcome_horizon": "contractual loan lifetime",
+        },
+        "manifest": manifest,
+        "data_sha256": data_sha,
+        "random_state": random_state,
+        "data_rows": len(labeled),
+        "split_rows": {
+            "train": len(train_data),
+            "calibration": len(calibration_data),
+            "policy_validation": len(policy_data),
+            "locked_test": len(test_data),
+        },
+        "split_definition": {
+            "train": "issue_date < 2011-01-01",
+            "calibration": "2011-01-01 <= issue_date < 2011-04-01",
+            "policy_validation": "2011-04-01 <= issue_date < 2011-07-01",
+            "locked_test": "issue_date >= 2011-07-01",
+        },
+        "trained_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "sklearn_version": sklearn.__version__,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(artifact, output_path)
+    _write_contract_files(output_path, artifact)
+    return artifact
+
+
+def main() -> None:
+    """CLI huấn luyện model với manifest bắt buộc."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description="Huấn luyện funded-loan lifetime charge-off risk model.")
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=Path("data/raw/lendingclub_2007_2011.csv"),
+        help="CSV LendingClub do người dùng tự cung cấp.",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("data/data_manifest.json"),
+        help="Manifest chứa source, license/provenance và dataset_as_of_date.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("artifacts/loan_default_cv.joblib"),
+    )
+    parser.add_argument("--report-dir", type=Path, default=Path("reports"))
+    args = parser.parse_args()
+    artifact = train(args.data, args.output, args.report_dir, manifest_path=args.manifest)
+    print(f"Đã lưu artifact: {args.output}")
+    print(f"Model: {artifact['model_name']} | Locked Test PR-AUC: {artifact['metrics']['pr_auc']:.4f}")
+    print(f"Manual-review capacity: {artifact['policy']['maximum_review_rate']:.0%}")
+
+
 if __name__ == "__main__":
     main()
-

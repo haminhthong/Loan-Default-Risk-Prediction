@@ -159,3 +159,46 @@ def logistic_odds_ratios(pipeline, top_n: int = 30) -> pd.DataFrame:
     return report.nlargest(top_n, "absolute_coefficient").drop(
         columns="absolute_coefficient"
     ).reset_index(drop=True)
+
+
+def cohort_performance_report(
+    data: pd.DataFrame,
+    probabilities,
+    dataset_as_of_date: str | pd.Timestamp,
+) -> pd.DataFrame:
+    """Đánh giá performance chỉ trên các cohort đã qua maturity gate.
+
+    Cohort chưa mature vẫn xuất hiện trong registry nhưng các metric outcome để
+    ``NaN``; như vậy monitoring không vô tình coi dữ liệu thiếu outcome là good.
+    """
+    from src.data import add_maturity_columns
+    from src.evaluate import capture_at_k
+
+    frame = add_maturity_columns(data, dataset_as_of_date)
+    frame["cohort"] = frame["issue_date"].dt.to_period("Q").astype(str)
+    frame["probability"] = np.asarray(probabilities)
+    frame["target"] = frame["loan_status"].map({"Fully Paid": 0, "Charged Off": 1})
+    rows = []
+    for cohort, group in frame.groupby("cohort", sort=True):
+        mature = group.loc[
+            (group["outcome_maturity_status"] == "MATURE")
+            & group["target"].notna()
+        ].copy()
+        is_mature = len(mature) == len(group)
+        row = {
+            "cohort": cohort,
+            "mature": bool(is_mature),
+            "n": len(mature),
+            "default_rate": float(mature["target"].mean()) if len(mature) else np.nan,
+            "pr_auc": np.nan,
+            "brier_score": np.nan,
+            "capture_at_20": np.nan,
+        }
+        if len(mature) and mature["target"].nunique() == 2:
+            from sklearn.metrics import average_precision_score, brier_score_loss
+
+            row["pr_auc"] = float(average_precision_score(mature["target"], mature["probability"]))
+            row["brier_score"] = float(brier_score_loss(mature["target"], mature["probability"]))
+            row["capture_at_20"] = capture_at_k(mature["target"], mature["probability"], 0.20)
+        rows.append(row)
+    return pd.DataFrame(rows)

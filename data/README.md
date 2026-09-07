@@ -1,26 +1,38 @@
-# Danh mục dữ liệu
+# Danh mục dữ liệu và provenance
+
+Pipeline production chỉ chạy khi `data/data_manifest.json` có provenance đã
+xác minh và `dataset_as_of_date`. Manifest là source of truth cho maturity gate;
+không suy đoán snapshot date từ tên file hoặc từ `Current`.
 
 ## Dữ liệu dùng cho mô hình chính
 
-`raw/lendingclub_2007_2011.csv` là bản LendingClub đầy đủ gồm 39.717 dòng và
-111 cột. Dữ liệu có `issue_d` từ tháng 06/2007 đến 12/2011, nhờ đó dự án có thể
-đánh giá out-of-time thay vì dùng ngày 2021 đã bị biến đổi.
+`raw/lendingclub_2007_2011.csv` là dữ liệu do người dùng tự cung cấp. File CSV
+không được commit khi license chưa được xác minh. Hãy đặt file vào `data/raw/`
+và cập nhật manifest trước khi chạy `python -m src.train`.
 
 | Trạng thái | Số dòng | Cách xử lý |
 |---|---:|---|
 | `Fully Paid` | 32.950 | Nhãn 0 |
 | `Charged Off` | 5.627 | Nhãn 1 |
-| `Current` | 1.140 | Loại vì chưa có kết quả cuối cùng |
+| `Current` hoặc chưa đủ contractual maturity | — | `CENSORED`, không gắn nhãn |
 
-Pipeline chỉ dùng các trường có tại thời điểm cấp vay. Các trường hậu nghiệm như
-`total_pymnt`, `recoveries`, `last_pymnt_d`, `out_prncp` và
-`collection_recovery_fee` không nằm trong danh sách đặc trưng.
+Pipeline chỉ dùng application/credit-history features có tại thời điểm cấp vay.
+Pricing/policy proxies (`int_rate`, `grade`, `sub_grade`, `installment`) và
+`addr_state` không nằm trong production feature contract.
 
-Split theo thời gian:
+Maturity rule:
+
+```text
+contractual_maturity_date = issue_date + term_months
+supervised label only when contractual_maturity_date <= dataset_as_of_date
+```
+
+Canonical split theo thời gian:
 
 - Train: trước 01/01/2011 — 18.061 khoản vay đã kết thúc.
-- Validation: 01/01/2011–30/06/2011 — 9.015 khoản vay.
-- Test: từ 01/07/2011 — 11.501 khoản vay.
+- Calibration: 01/01/2011–31/03/2011.
+- Policy Validation: 01/04/2011–30/06/2011.
+- Locked Test: từ 01/07/2011.
 
 ## Các tệp bổ sung
 
@@ -46,7 +58,7 @@ Toàn bộ CSV được loại khỏi Git bằng `.gitignore`. Trước khi côn
 cần bổ sung URL phiên bản chính xác, tác giả/tổ chức, ngày truy cập, giấy phép và
 SHA-256; nếu không, chỉ cung cấp hướng dẫn để người dùng tự đặt dữ liệu vào máy.
 
-Checksum SHA-256 của các tệp đang dùng:
+Checksum SHA-256 của dataset thực tế phải được ghi trong manifest sau khi xác minh:
 
 | Tệp | SHA-256 |
 |---|---|
@@ -58,12 +70,12 @@ Checksum SHA-256 của các tệp đang dùng:
 
 ## Định nghĩa nhãn
 
-`loan_status` là trạng thái có sẵn trong dữ liệu. Dự án chỉ ánh xạ:
+`loan_status` là trạng thái có sẵn trong dữ liệu. Sau maturity gate, dự án chỉ ánh xạ:
 
 ```text
 Charged Off -> default_flag = 1
 Fully Paid  -> default_flag = 0
-Current     -> loại khỏi mô hình
+Current/CENSORED -> không gắn nhãn, không vào train/test
 ```
 
 Cách ánh xạ này không thay thế định nghĩa nghiệp vụ ban đầu của nhà cung cấp.

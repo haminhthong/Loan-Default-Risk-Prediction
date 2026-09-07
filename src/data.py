@@ -1,5 +1,4 @@
-"""
-Mô-đun Nạp và Kiểm Tra Schema Dữ Liệu Tín Dụng (Data Ingestion & Validation).
+"""Nạp dữ liệu, kiểm tra schema và chia dữ liệu theo thời gian.
 
 Tác dụng:
 - Đọc tệp CSV dữ liệu khoản vay LendingClub.
@@ -157,3 +156,238 @@ def analyze_target_censoring(data: pd.DataFrame) -> pd.DataFrame:
 
     return summary[["total_loans", "Fully Paid", "Charged Off", "Current", "exclusion_rate"]].sort_index()
 
+
+# ---------------------------------------------------------------------------
+# API contract mới: maturity-aware target và bốn temporal blocks.
+# Các hàm bên dưới được đặt sau API legacy để consumer cũ vẫn import được,
+# trong khi pipeline mới luôn sử dụng các hàm này.
+# ---------------------------------------------------------------------------
+
+import json
+from typing import Any
+import numpy as np
+
+
+FINAL_STATUSES = {"Fully Paid", "Charged Off"}
+TEMPORAL_CUTOFFS = {
+    "train_end": pd.Timestamp("2011-01-01"),
+    "calibration_end": pd.Timestamp("2011-04-01"),
+    "policy_validation_end": pd.Timestamp("2011-07-01"),
+}
+
+
+def _parse_term_months(series: pd.Series) -> pd.Series:
+    """Trích số tháng từ ``36 months``/``60 months`` và kiểm tra miền hợp lệ."""
+    months = pd.to_numeric(
+        series.astype("string").str.extract(r"(\d+)", expand=False),
+        errors="coerce",
+    )
+    if months.isna().any() or (~months.isin([36, 60])).any():
+        raise ValueError("Cột 'term' chỉ được chứa kỳ hạn 36 hoặc 60 tháng.")
+    return months.astype("int64")
+
+
+def read_manifest(path: str | Path) -> dict[str, Any]:
+    """Đọc manifest và kiểm tra các khóa tối thiểu của target contract."""
+    manifest_path = Path(path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy data manifest: {manifest_path}. "
+            "Hãy khai báo dataset_as_of_date trước khi huấn luyện."
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Manifest không phải JSON hợp lệ: {manifest_path}") from exc
+
+    required = {
+        "dataset_id",
+        "source",
+        "source_version",
+        "downloaded_at",
+        "dataset_as_of_date",
+        "sha256",
+        "raw_rows",
+        "target_contract",
+    }
+    missing = sorted(required - manifest.keys())
+    if missing:
+        raise ValueError(f"Manifest thiếu các trường bắt buộc: {missing}")
+    if not manifest.get("dataset_as_of_date"):
+        raise ValueError(
+            "Manifest chưa có dataset_as_of_date; không thể kiểm tra outcome maturity."
+        )
+    for key in ("source", "source_version", "downloaded_at", "sha256", "raw_rows"):
+        if manifest.get(key) in (None, ""):
+            raise ValueError(f"Manifest chưa xác minh trường provenance '{key}'.")
+    try:
+        pd.Timestamp(manifest["dataset_as_of_date"])
+    except Exception as exc:
+        raise ValueError("dataset_as_of_date trong manifest không hợp lệ.") from exc
+
+    target_contract = manifest["target_contract"]
+    for key in ("name", "positive", "negative", "maturity_policy"):
+        if not target_contract.get(key):
+            raise ValueError(f"target_contract thiếu trường '{key}'.")
+    return manifest
+
+
+def add_maturity_columns(
+    data: pd.DataFrame,
+    dataset_as_of_date: str | pd.Timestamp,
+) -> pd.DataFrame:
+    """Tính ngày đáo hạn hợp đồng và đánh dấu cohort đã đủ dữ liệu kết quả."""
+    if not dataset_as_of_date:
+        raise ValueError("Phải cung cấp dataset_as_of_date để chạy maturity gate.")
+    result = data.copy()
+    if "issue_date" not in result.columns:
+        result["issue_date"] = pd.to_datetime(
+            result["issue_d"], format="%b-%y", errors="coerce"
+        )
+    result["issue_date"] = pd.to_datetime(result["issue_date"], errors="coerce")
+    if result["issue_date"].isna().any():
+        raise ValueError("Tồn tại ngày phát hành không hợp lệ trong maturity gate.")
+
+    term_months = _parse_term_months(result["term"])
+    as_of = pd.Timestamp(dataset_as_of_date)
+    result["term_months"] = term_months
+    result["contractual_maturity_date"] = pd.to_datetime(
+        [
+            issue_date + pd.DateOffset(months=int(months))
+            for issue_date, months in zip(result["issue_date"], term_months)
+        ]
+    )
+    result["dataset_as_of_date"] = as_of
+    result["outcome_maturity_status"] = np.where(
+        result["contractual_maturity_date"] <= as_of,
+        "MATURE",
+        "CENSORED",
+    )
+    return result
+
+
+def temporal_split_four_blocks(
+    data: pd.DataFrame,
+    require_non_empty: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Chia dữ liệu thành Train, Calibration, Policy Validation và Locked Test."""
+    if "issue_date" not in data.columns:
+        raise ValueError("Dữ liệu phải có cột issue_date trước khi chia temporal blocks.")
+    dates = pd.to_datetime(data["issue_date"], errors="coerce")
+    train = data.loc[dates < TEMPORAL_CUTOFFS["train_end"]].copy()
+    calibration = data.loc[
+        (dates >= TEMPORAL_CUTOFFS["train_end"])
+        & (dates < TEMPORAL_CUTOFFS["calibration_end"])
+    ].copy()
+    policy_validation = data.loc[
+        (dates >= TEMPORAL_CUTOFFS["calibration_end"])
+        & (dates < TEMPORAL_CUTOFFS["policy_validation_end"])
+    ].copy()
+    test = data.loc[dates >= TEMPORAL_CUTOFFS["policy_validation_end"]].copy()
+    blocks = (train, calibration, policy_validation, test)
+    names = ("Train", "Calibration", "Policy Validation", "Locked Test")
+    if require_non_empty:
+        sizes = dict(zip(names, (len(block) for block in blocks)))
+        if any(size == 0 for size in sizes.values()):
+            detail = ", ".join(f"{name}={size}" for name, size in sizes.items())
+            raise ValueError(f"Không đủ dữ liệu cho temporal split: {detail}")
+        for previous, current, previous_name, current_name in zip(
+            blocks, blocks[1:], names, names[1:]
+        ):
+            if previous["issue_date"].max() >= current["issue_date"].min():
+                raise ValueError(
+                    f"Rò rỉ thời gian: {previous_name} trùng hoặc sau {current_name}."
+                )
+    return blocks
+
+
+def _maturity_aware_censoring_report(
+    data: pd.DataFrame,
+    dataset_as_of_date: str | pd.Timestamp,
+) -> pd.DataFrame:
+    """Báo cáo cohort có phân biệt CENSORED và outcome đã trưởng thành."""
+    frame = add_maturity_columns(data, dataset_as_of_date)
+    frame["cohort_month"] = frame["issue_date"].dt.to_period("M").astype(str)
+    summary = (
+        frame.groupby("cohort_month")
+        .agg(
+            total_loans=("loan_status", "size"),
+            mature_loans=("outcome_maturity_status", lambda s: (s == "MATURE").sum()),
+            censored_loans=("outcome_maturity_status", lambda s: (s == "CENSORED").sum()),
+            fully_paid=("loan_status", lambda s: (s == "Fully Paid").sum()),
+            charged_off=("loan_status", lambda s: (s == "Charged Off").sum()),
+            current=("loan_status", lambda s: (s == "Current").sum()),
+        )
+        .sort_index()
+    )
+    summary["exclusion_rate"] = summary["censored_loans"] / summary["total_loans"].replace(0, 1)
+    # Alias đọc-only để báo cáo legacy không bị gãy trong lúc migrate.
+    summary["Fully Paid"] = summary["fully_paid"]
+    summary["Charged Off"] = summary["charged_off"]
+    summary["Current"] = summary["current"]
+    return summary
+
+
+def load_data(
+    path: str | Path,
+    manifest_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Đọc CSV, kiểm tra schema và gắn metadata manifest vào DataFrame."""
+    data = pd.read_csv(path, low_memory=False)
+    missing_columns = REQUIRED_COLUMNS - set(data.columns)
+    if missing_columns:
+        raise ValueError(f"Dữ liệu đầu vào thiếu các cột bắt buộc: {sorted(missing_columns)}")
+    if data["id"].isna().any():
+        raise ValueError("Cột 'id' chứa giá trị rỗng (NaN/Null).")
+    if data["id"].duplicated().any():
+        raise ValueError("Cột 'id' chứa các giá trị trùng lặp. Yêu cầu ID phải duy nhất.")
+
+    unknown_statuses = set(data["loan_status"].dropna().unique()) - ALLOWED_STATUSES
+    if unknown_statuses:
+        raise ValueError(
+            f"Trạng thái 'loan_status' chứa giá trị không hợp lệ: {sorted(unknown_statuses)}"
+        )
+    data["issue_date"] = pd.to_datetime(data["issue_d"], format="%b-%y", errors="coerce")
+    if data["issue_date"].isna().any():
+        raise ValueError("Tồn tại giá trị 'issue_d' không chuyển đổi được sang kiểu ngày tháng.")
+    _parse_term_months(data["term"])
+
+    manifest = read_manifest(manifest_path) if manifest_path else None
+    data.attrs["manifest"] = manifest
+    data.attrs["dataset_as_of_date"] = (
+        manifest.get("dataset_as_of_date") if manifest else None
+    )
+    return data
+
+
+def analyze_target_censoring(
+    data: pd.DataFrame,
+    dataset_as_of_date: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Báo cáo trạng thái outcome, maturity và tỷ lệ cohort bị censor."""
+    if dataset_as_of_date:
+        return _maturity_aware_censoring_report(data, dataset_as_of_date)
+    frame = data.copy()
+    if "issue_date" not in frame.columns:
+        frame["issue_date"] = pd.to_datetime(
+            frame["issue_d"], format="%b-%y", errors="coerce"
+        )
+    frame["cohort_month"] = frame["issue_date"].dt.to_period("M").astype(str)
+    summary = (
+        frame.groupby("cohort_month")
+        .agg(
+            total_loans=("loan_status", "size"),
+            mature_loans=("loan_status", lambda s: s.isin(FINAL_STATUSES).sum()),
+            censored_loans=("loan_status", lambda s: (~s.isin(FINAL_STATUSES)).sum()),
+            fully_paid=("loan_status", lambda s: (s == "Fully Paid").sum()),
+            charged_off=("loan_status", lambda s: (s == "Charged Off").sum()),
+            current=("loan_status", lambda s: (s == "Current").sum()),
+        )
+        .sort_index()
+    )
+    summary["exclusion_rate"] = summary["censored_loans"] / summary["total_loans"].replace(0, 1)
+    # Alias đọc-only để báo cáo legacy không bị gãy trong lúc migrate.
+    summary["Fully Paid"] = summary["fully_paid"]
+    summary["Charged Off"] = summary["charged_off"]
+    summary["Current"] = summary["current"]
+    return summary
