@@ -244,6 +244,8 @@ Container không nhúng raw dataset hoặc artifact. Muốn score phải mount/c
 ├── data/
 │   ├── data_manifest.json  # provenance/checksum/snapshot contract
 │   └── raw/                # raw CSV do người dùng tự cung cấp
+├── scripts/
+│   └── verify_data.py      # kiểm tra snapshot theo cùng data contract
 ├── artifacts/              # generated model and contracts
 ├── reports/                # generated reports
 ├── tests/                  # canonical contract tests
