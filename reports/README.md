@@ -1,16 +1,22 @@
 # Báo cáo có thể tái tạo
 
-Các tệp trong thư mục này được sinh bởi `python -m src.train`:
+Các file trong thư mục này được sinh bởi:
 
-- `model_comparison.csv`: PR-AUC/ROC-AUC của Logistic C tuning bằng expanding-window CV trên Train.
-- `test_metrics.json`: đánh giá một lần trên test độc lập.
-- `slice_*.csv`: metric theo grade, sở hữu nhà và `addr_state` cho nhóm đủ cỡ mẫu.
-- `feature_set_comparison.csv`: diagnostic Train/Calibration; không chứa metric Locked Test và không dùng để chọn production contract.
-- `review_policy.json`: capacity policy được freeze trên Policy Validation.
-- `calibration_test.csv`: xác suất dự báo và default rate theo bin.
-- `drift_psi.csv`: PSI và tỷ lệ thiếu giữa train và test.
-- `logistic_odds_ratios.csv`: hệ số và odds ratio phục vụ giải thích mô hình.
+```bash
+python -m src.train --data data/raw/lendingclub_2007_2011.csv --manifest data/data_manifest.json
+```
 
-Các slice chỉ hỗ trợ phát hiện chênh lệch hiệu năng, không chứng minh fairness.
-Các báo cáo cũ trong thư mục này không phải canonical result cho tới khi chạy lại
-pipeline với manifest hợp lệ.
+## Canonical outputs
+
+- `model_cv.csv`: expanding-window CV để chọn C trong Train.
+- `test_metrics.json`: metric duy nhất trên Locked Test.
+- `bootstrap_ci.json`: khoảng tin cậy bootstrap cho metric chính.
+- `target_censoring.csv`: maturity và censoring theo cohort.
+- `calibration_test.csv`: reliability theo probability bin.
+- `decile_reliability.csv`: ranking và captured defaults theo decile.
+- `drift_psi.csv`: PSI giữa Train và Locked Test.
+- `cohort_performance.csv`: performance chỉ ở cohort đã mature.
+- `logistic_odds_ratios.csv`: coefficient và odds ratio global.
+- `slice_*.csv`: metric theo application slice đủ cỡ mẫu.
+
+Không commit số liệu kết quả nếu chưa biết snapshot/manifest. Reports không thay thế artifact contract và không được dùng để tự chọn lại threshold sau Locked Test.

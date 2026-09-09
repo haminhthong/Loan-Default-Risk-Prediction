@@ -1,8 +1,20 @@
 name: ci
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -10,10 +22,23 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip check
       - run: python -m pytest -q
-      - run: python -m compileall src app scripts
+      - run: python -m compileall -q src app scripts
       - run: docker build -t loan-default-risk:test .
       - run: |
-          docker run -d --name loan-api -p 8000:8000 loan-default-risk:test
-          sleep 3
-          curl -f http://localhost:8000/health || exit 1
+          set -euo pipefail
+          container_id=$(docker run -d -p 8000:8000 loan-default-risk:test)
+          cleanup() {
+            docker logs "$container_id" || true
+            docker rm -f "$container_id" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API không khởi động trong thời gian cho phép."
+          exit 1

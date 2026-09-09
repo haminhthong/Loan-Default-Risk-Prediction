@@ -1,284 +1,283 @@
-# Loan Default Risk Decision Support Platform
+# Loan Default Risk Prediction
 
-A point-in-time, leakage-safe funded-loan lifetime charge-off risk scoring system with maturity-aware labels, calibrated probabilities, capacity-constrained manual review and mature-cohort monitoring.
+[![CI](https://github.com/haminhthong/Loan-Default-Risk-Prediction/actions/workflows/ci.yml/badge.svg)](https://github.com/haminhthong/Loan-Default-Risk-Prediction/actions/workflows/ci.yml)
 
-Dự án Machine Learning phân loại rủi ro tín dụng cá nhân được thiết kế theo chuẩn **Loan Default Risk Decision Support Platform**, tập trung vào quy trình kiểm thử trung thực: phân chia dữ liệu theo mốc thời gian phát hành (Temporal Out-of-Time Split), bảo vệ kép chống rò rỉ dữ liệu (Point-in-Time Feature Contract & Denylist Guard), hiệu chỉnh xác suất (Temporal Sigmoid Calibration), phân tách tầng quyết định vận hành theo chi phí (Cost/Capacity Decision Layer), đánh giá độ ổn định phân khúc (Segment Performance Stability) và giám sát biến động dữ liệu theo nhóm thời gian (Cohort Drift Monitoring).
+[![Python 3.11](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![scikit--learn](https://img.shields.io/badge/ML-scikit--learn-F7931E?logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
+[![Docker](https://img.shields.io/badge/runtime-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
----
+Nền tảng ước lượng xác suất `lifetime_chargeoff_probability` cho nhóm khoản vay đã được cấp vốn, với nhãn maturity-aware, feature contract chống leakage, validation theo thời gian, calibration và policy manual-review giới hạn capacity. Dự án chỉ hỗ trợ xếp hạng rủi ro; không tự động approve, reject, định giá lãi suất hoặc tính Expected Loss.
 
-## 🏗️ 1. Kiến Trúc Pipeline Chuẩn 8 Giai Đoạn (Canonical 8-Stage Pipeline)
+## 1. Bài toán và phạm vi ứng dụng
 
-Dự án tuân thủ duy nhất một sơ đồ đường ống xử lý 8 giai đoạn từ dữ liệu thô đến phục vụ API & Giám sát vận hành:
+Mục tiêu là ước lượng xác suất một khoản vay đã được cấp vốn bị `Charged Off` trong toàn bộ vòng đời hợp đồng.
 
-```
-1. DATA INGESTION & LABEL MATURITY
-   LendingClub historical loans
-        ↓
-   Schema validation & ID uniqueness
-        ↓
-   Outcome Maturity Gate
-   ├── Fully Paid → 0
-   └── Charged Off → 1
-   Immature/current → CENSORED, excluded from supervised data
-        ↓
+Đầu ra production gồm:
 
-2. POINT-IN-TIME FEATURE CONTRACT
-   Only information known at origination
-        ↓
-   Feature Contract Version: application-risk-v2
-   Target Contract Version: lifetime-chargeoff-v1
-   Allowlist + Leakage Denylist Guard
-        ↓
+- `lifetime_chargeoff_probability`: xác suất từ 0 đến 1.
+- `risk_band`: `LOW`, `MEDIUM` hoặc `HIGH`, lấy boundary từ artifact policy.
+- `top_risk_factors`: đóng góp dương của Logistic Regression, chỉ là giải thích hành vi model.
+- review queue riêng: chọn tối đa 20% hồ sơ có score cao nhất trong cả batch.
 
-3. FEATURE ENGINEERING
-   Applicant / Loan / Credit History
-        ↓
-   Derived: term_months, emp_length_years, revolving_utilization,
-            log_annual_income, credit_history_years
-        ↓
+Hệ thống không tự động approve/reject, không tính lãi suất, không dùng outcome sau giải ngân làm feature và chưa phải mô hình EAD/LGD/Expected Loss.
 
-4. TEMPORAL DEVELOPMENT PROTOCOL
-   Train: before 2011
-   Calibration: 2011 Q1
-   Policy Validation: 2011 Q2
-   Locked Test: 2011 H2 (2011-07-01 onwards)
-        ↓
-   Inside Train: 3-fold Expanding-Window Temporal CV
-        ↓
+## 2. Quy trình kỹ thuật duy nhất
 
-5. MODEL DEVELOPMENT
-   Candidate: regularized Logistic Regression; tune C in Train
-        ↓
-   CV PR-AUC Evaluation
-        ↓
-   Application-only feature contract; no pricing/policy proxy in production
-        ↓
+Sơ đồ dưới đây là source of truth chi phối code, configuration, artifact và reports.
 
-6. PROBABILITY & DECISION LAYER
-   Champion Base Model
-        ↓
-   Temporal Sigmoid Calibration
-        ↓
-   Calibration Probabilities
-        ↓
-   Policy Validation: freeze maximum manual-review capacity (20%)
-   Risk Bands: LOW (< 10%), MEDIUM (10%–25%), HIGH (> 25%)
-        ↓
+Các hằng số của protocol nằm trong `src/data.py` (schema và mốc thời gian), `src/features.py` (feature allowlist), `src/train.py` (CV và lifecycle) và `src/evaluate.py` (capacity policy). Không có một pipeline thứ hai được phép tự chọn target, feature, split hoặc threshold.
 
-7. FINAL OUT-OF-TIME TEST
-   PR-AUC / ROC-AUC / KS Statistic / Gini / PR-AUC Lift
-   Recall / Precision / Brier Score / Decile Reliability Table
-   Bootstrap 95% CIs & Segment Performance Stability
-        ↓
-
-8. SERVING & MONITORING
-   FastAPI RESTful API / Streamlit Dashboard
-        ↓
-   Lifetime Charge-Off Probability & Risk Bands
-        ↓
-   Review Policy Flag & Model-Derived Contribution Factors
-        ↓
-   Cohort Maturity Window & Data/Score Drift Monitoring
+```mermaid
+flowchart TD
+    Cfg[Canonical constants<br/>target, feature, split, capacity] --> P[Pipeline protocol]
+    A[Raw CSV snapshot] --> B[Verified data manifest]
+    B --> C{Schema, row count<br/>và SHA-256 hợp lệ?}
+    C -- Không --> X[Stop với lỗi dữ liệu]
+    C -- Có --> D[Contractual maturity gate]
+    D --> E{Đã đủ maturity?}
+    E -- Chưa đủ --> F[CENSORED<br/>chỉ monitoring, không supervised]
+    E -- Đủ --> G[lifetime_chargeoff_flag<br/>Fully Paid=0, Charged Off=1]
+    G --> H[build_features<br/>16 application features, allowlist]
+    H --> I[Temporal blocks<br/>Train | Calibration | Policy Validation | Locked Test]
+    I --> J[Train<br/>expanding CV chọn C + Logistic Regression]
+    J --> K[Calibration<br/>sigmoid trên Calibration block]
+    K --> L[Policy Validation<br/>freeze top 20% manual-review policy]
+    L --> M[Locked Test<br/>metrics, bootstrap CI, calibration, drift, slices]
+    M --> N[Artifact + contracts + reports]
+    N --> O[API / Streamlit<br/>score thuần hoặc batch review queue]
+    P -. kiểm soát .-> C
+    P -. kiểm soát .-> H
+    P -. kiểm soát .-> I
+    P -. kiểm soát .-> L
+    P -. kiểm soát .-> N
 ```
 
----
+### Các mốc thời gian cố định
 
-## 📌 2. Problem Definition & Decision Boundary
+- Train: `issue_date < 2011-01-01`.
+- Calibration: `2011-01-01 <= issue_date < 2011-04-01`.
+- Policy Validation: `2011-04-01 <= issue_date < 2011-07-01`.
+- Locked Test: `issue_date >= 2011-07-01`.
 
-### 2.1. Định Nghĩa Bài Toán Tín Dụng
-- **Mục tiêu**: Ước lượng `lifetime_chargeoff_probability` của khoản vay trong population đã được cấp vốn.
-- **Thời điểm dự báo**: Ngay trước hoặc tại thời điểm phát hành/giải ngân khoản vay (Point-in-Time).
-- **Đầu ra hệ thống**:
-  1. Xác suất Charged Off trong toàn bộ vòng đời hợp đồng (`0.0` đến `1.0`).
-  2. Phân hạng rủi ro (Risk Band: `LOW`, `MEDIUM`, `HIGH`).
-  3. Cờ `review_required` từ capacity policy.
-  4. Các đóng góp dương của Logistic Regression theo từng hồ sơ.
-- **Giới hạn phạm vi (Out of Scope)**:
-  - Tự động phê duyệt hoặc từ chối khoản vay.
-  - Định giá lãi suất (Interest Pricing).
-  - Dự báo tổn thất tài chính bằng tiền cụ thể ($EL = PD \times EAD \times LGD$).
 
-> [!NOTE]
-> Đây là `P(Charged Off | Funded Loan)`, không phải `P(Default | Any Applicant)` và không phải mô hình Expected Loss.
+## 3. Luồng data và contract
 
----
-
-## 🛑 3. Target Censoring & Outcome Maturity Gate
-
-Hệ thống thiết lập cổng kiểm soát độ chín của nhãn (**Outcome Maturity Gate**):
-
-```
-Raw Loans Data
-      ↓
-Outcome Maturity Check
-      ↓
-Finalized?
- ├── YES → Fully Paid (0) / Charged Off (1)
- └── NO  → CENSORED (không gắn nhãn, không vào supervised data)
+```mermaid
+flowchart TD
+    A[CSV raw + data_manifest.json] --> B[load_data]
+    B --> C[validate_schema và SHA-256]
+    C --> D[add_maturity_columns]
+    D --> E[create_lifetime_target]
+    E --> F[build_features]
+    F --> G[train hoặc predict]
+    G --> H[probability và risk_band]
+    H --> I[/v1/risk/score]
+    H --> J[build_review_queue]
+    J --> K[/v1/review/queue]
 ```
 
-### Maturity contract
-Chỉ gắn nhãn khi `issue_date + term_months <= dataset_as_of_date`. Khoản vay
-`Current` hoặc chưa đủ contractual maturity không được gắn nhãn 0 và không vào
-Train, Calibration, Policy Validation hay Locked Test.
+### Target contract
 
----
+`lifetime-chargeoff-v1` chỉ ánh xạ `Fully Paid -> 0` và `Charged Off -> 1`. Khoản vay `Current` hoặc chưa đến `contractual_maturity_date` là `CENSORED`, không vào supervised block.
 
-## 🛡️ 4. Point-in-Time Feature Contract Versioning & Leakage Guard
+### Feature contract
 
-Hệ thống kết hợp cả **Allowlist** (chỉ giữ thuộc tính trước giải ngân) và **Denylist** (`LEAKAGE_COLUMNS`):
-- **Feature Contract Version**: `application-risk-v2`
-- **Target Contract Version**: `lifetime-chargeoff-v1`
+`application-risk-v2` có đúng 16 feature theo thứ tự cố định:
 
-Các trường thông tin phát sinh sau giải ngân (`total_pymnt`, `last_pymnt_amnt`, `recoveries`, `out_prncp`, v.v.) bị chặn tuyệt đối. Nếu phát hiện trường hậu nghiệm trong ma trận đặc trưng, pipeline sẽ ném lỗi `ValueError` ngay lập tức.
+```text
+loan_amnt, term_months, emp_length_years, home_ownership,
+log_annual_income, verification_status, purpose, dti, delinq_2yrs,
+inq_last_6mths, open_acc, pub_rec, revol_bal, revolving_utilization,
+total_acc, credit_history_years
+```
 
----
+## 4. Cài đặt
 
-## 🧪 5. Feature Engineering & Pricing Variable Ablation
+Yêu cầu Python 3.11+ và Docker nếu muốn chạy container.
 
-Production dùng application/credit-history features: `term_months`,
-`emp_length_years`, `revolving_utilization`, `log_annual_income` và
-`credit_history_years`. Pricing/underwriting proxies không vào score.
-
-### Thử Nghiệm Ablation Study Biến Định Giá & Chính Sách Cũ
-
-| Cấp Độ Ablation | Số Đặc Trưng | PR-AUC (Test) | ROC-AUC (Test) | Recall (Test) | Precision (Test) | Brier Score |
-|---|---:|---:|---:|---:|---:|---:|
-| `application-risk-v2` (Production) | 16 | Chỉ báo cáo sau khi chạy manifest-aware pipeline | — | — | — |
-
-### Champion Selection Policy (Chính Sách Chọn Mô Hình Vô Địch)
-Mô hình production là L2 Logistic Regression trên `application-risk-v2`.
-> [!IMPORTANT]
-> Ablation chỉ là diagnostic trên Train/Calibration, không được dùng để chọn
-> feature contract hoặc headline Locked Test.
-
----
-
-## 📅 6. Temporal Development Protocol & CV
-
-Dữ liệu được phân chia theo mốc thời gian thực tế:
-- **Tập Train**: Các khoản vay phát hành trước `2011-01-01`.
-- **Tập Calibration**: Quý 1/2011 (`2011-01-01` đến `2011-03-31`).
-- **Tập Policy Validation**: Quý 2/2011 (`2011-04-01` đến `2011-06-30`).
-- **Tập Test Out-of-Time**: Các khoản vay nửa cuối năm 2011 (`2011-07-01` trở đi).
-
-Trong tập Train, mô hình so sánh các ứng viên bằng **3-fold Expanding-Window Temporal CV**:
-- Fold 1: Train 2007–2008 $\rightarrow$ Validate 2009
-- Fold 2: Train 2007–2009 $\rightarrow$ Validate H1/2010
-- Fold 3: Train 2007–H1/2010 $\rightarrow$ Validate H2/2010
-
----
-
-## 🎯 7. Probability Calibration & Decision Layer
-
-1. **Hiệu chỉnh xác suất**: Fit base Logistic trên Train, sau đó fit sigmoid riêng trên Calibration block.
-2. **Tách biệt risk model và review policy**:
-   - Policy Validation đóng băng capacity tối đa 20% hồ sơ vào manual review.
-   - **Risk Bands**:
-     - `LOW`: $PD < 10\%$
-     - `MEDIUM`: $10\% \le PD \le 25\%$
-     - `HIGH`: $PD > 25\%$
-
----
-
-## 📊 8. Final Out-of-Time Test & Reliability Diagnostics
-
-### 8.1. Bảng Chỉ Số Đánh Giá Đầy Đủ (Tập Test Out-of-Time)
-
-| Metric Đánh Giá | Giá Trị Point Estimate | Khoảng Tin Cậy 95% Bootstrap CI | Ý Nghĩa Nghiệp Vụ Tín Dụng |
-|---|---:|---|---|
-| **PR-AUC / ROC-AUC / Brier** | Sinh từ `reports/test_metrics.json` | Bootstrap CI trong artifact | Chỉ ghi sau khi manifest và policy đã freeze |
-| **Capture@20% / Precision@20% / Lift@20%** | Sinh từ canonical pipeline | Bootstrap CI tùy cấu hình | Hiệu quả của manual-review capacity |
-
-### 8.2. Bảng Đánh Giá Theo Decile (Decile Reliability Table)
-
-| Decile | Số Khoản Vay | Pred PD Avg | Actual Default Rate | Captured Defaults Share |
-|---|---:|---:|---:|---:|
-| **Decile 1 (Rủi ro cao nhất)** | 1,150 | 29.32% | 37.30% | **22.37%** |
-| **Decile 2** | 1,150 | 20.04% | 27.13% | **16.27%** |
-| **Decile 3** | 1,151 | 16.20% | 24.50% | **14.70%** |
-| **Decile 4** | 1,149 | 13.71% | 18.10% | 10.84% |
-| **Decile 5-10** | 6,900 | 7.91% | 8.21% | 35.82% |
-
----
-
-## 🌐 9. RESTful API, Streamlit & Load Test
-
-### Khởi Chạy API Backend (FastAPI)
 ```bash
-uvicorn app.api:app --reload --port 8000
+git clone https://github.com/haminhthong/Loan-Default-Risk-Prediction.git
+cd Loan-Default-Risk-Prediction
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
 ```
-- Endpoint `/info`: Trả về metadata phiên bản contract (`application-risk-v2`, `lifetime-chargeoff-v1`), metrics, và policy.
-- Endpoint `/score`: Nhận danh sách hồ sơ vay và trả về cấu trúc phân tách:
-  ```json
-  {
-    "risk": {
-      "lifetime_chargeoff_probability": 0.237,
-      "risk_band": "MEDIUM"
-    },
-    "review_required": true,
-    "model_factors": [
-      {"feature": "dti", "direction": "increases_model_score", "contribution": 0.41}
-    ]
-  }
-  ```
 
-### Khởi Chạy Streamlit Dashboard
+Kiểm tra môi trường:
+
+```bash
+python -m pip check
+python -m pytest -q
+```
+
+## 5. Chuẩn bị dữ liệu và manifest
+
+Không commit raw CSV chưa xác minh license. Đặt snapshot vào `data/raw/`, sau đó điền `data/data_manifest.json` theo mẫu:
+
+```json
+{
+  "dataset_id": "lendingclub-historical-v1",
+  "source": "<URL hoặc nguồn nội bộ đã xác minh>",
+  "source_version": "<version>",
+  "license": "<license>",
+  "downloaded_at": "2026-09-08T00:00:00Z",
+  "dataset_as_of_date": "2016-01-01",
+  "sha256": "<64 ký tự hex của CSV>",
+  "raw_rows": 1,
+  "target_contract": {
+    "name": "lifetime-chargeoff-v1",
+    "positive": "Charged Off",
+    "negative": "Fully Paid",
+    "maturity_policy": "contractual_term_completed"
+  }
+}
+```
+
+Manifest thiếu provenance, snapshot date, checksum hoặc target contract sẽ làm `src.train` dừng trước khi đọc nhãn. Đổi `raw_rows` và checksum theo đúng file thật.
+
+## 6. Huấn luyện và artifact
+
+Lệnh chính:
+
+```bash
+python -m src.train \
+  --data data/raw/lendingclub_2007_2011.csv \
+  --manifest data/data_manifest.json \
+  --output artifacts/risk_model.joblib \
+  --report-dir reports
+```
+
+Pipeline tạo:
+
+- `artifacts/risk_model.joblib`: calibrated model và metadata.
+- `artifacts/target_contract.json`: target contract.
+- `artifacts/feature_schema.json`: feature order và denylist.
+- `artifacts/review_policy.json`: capacity policy freeze từ Policy Validation.
+- `reports/model_cv.csv`, `test_metrics.json`, `bootstrap_ci.json`.
+- `reports/target_censoring.csv`, `calibration_test.csv`, `decile_reliability.csv`, `drift_psi.csv`, `cohort_performance.csv`, `logistic_odds_ratios.csv` và slice report nếu đủ cỡ mẫu.
+
+Không có metric production hard-code trong README; số liệu chỉ hợp lệ sau khi chạy lại với snapshot và manifest đã xác minh.
+
+## 7. Chạy API
+
+```bash
+uvicorn app.api:app --host 0.0.0.0 --port 8000
+```
+
+Healthcheck không cần model nên CI có thể kiểm tra container trước khi cung cấp artifact:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Endpoint canonical:
+
+- `GET /health`: trạng thái process và artifact.
+- `GET /v1/info`: contract, policy, metrics và split rows; cần `X-API-Key` nếu đặt `LOAN_API_KEY`.
+- `POST /v1/risk/score`: chỉ trả probability, risk band và model factors.
+- `POST /v1/review/queue`: score rồi chọn top-K manual review trong batch.
+- `GET /v1/explain/global`: odds ratio từ report sau train.
+
+Payload tối thiểu:
+
+```json
+{
+  "records": [
+    {
+      "loan_amnt": 10000,
+      "term_months": 36,
+      "emp_length_years": 5,
+      "home_ownership": "RENT",
+      "annual_inc": 60000,
+      "verification_status": "Verified",
+      "purpose": "debt_consolidation",
+      "dti": 15.2,
+      "revolving_utilization": 0.45,
+      "credit_history_years": 12
+    }
+  ]
+}
+```
+
+API từ chối field ngoài schema bằng Pydantic `extra=forbid`; policy queue không được suy ra từ từng record độc lập.
+
+## 8. Streamlit và Docker
+
+Dashboard:
+
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-### Benchmark Kiểm Thử Tải (Locust)
+Dashboard dùng cùng `src.predict` và `src.policy`: single scoring chỉ hiển thị risk score; batch mới tạo review queue.
+
+Docker:
+
 ```bash
-locust -f load_tests/locustfile.py --headless -u 100 -r 10 --run-time 2m --host http://localhost:8000
+docker build -t loan-default-risk:local .
+docker run --rm -p 8000:8000 loan-default-risk:local
 ```
 
----
+Container không nhúng raw dataset hoặc artifact. Muốn score phải mount/copy artifact hợp lệ và có thể đặt `LOAN_RISK_MODEL_PATH`.
 
-## 🔄 10. Cohort-Based Monitoring & Drift Framework
+## 9. Cấu trúc thư mục
 
-Hệ thống thiết lập cơ chế giám sát 3 tầng:
-1. **Data Drift (Feature Drift)**: Đo chỉ số PSI trên ma trận $X$ giữa Train và Test out-of-time.
-2. **Score Drift**: Đo chỉ số PSI trên phân phối xác suất dự báo $PD$.
-3. **Performance Drift**: Đánh giá lại kết quả theo từng tháng phát hành (Issue Cohort) sau khi khoản vay trải qua cửa sổ chín của nhãn (Maturity Window).
+```text
+.
+├── app/
+│   ├── api.py              # public entrypoint FastAPI
+│   └── streamlit_app.py    # dashboard
+├── src/
+│   ├── data.py             # schema, manifest, maturity, temporal split
+│   ├── features.py         # application-risk-v2
+│   ├── modeling.py         # temporal sigmoid calibration
+│   ├── train.py            # canonical training lifecycle và CLI
+│   ├── predict.py          # canonical artifact validation/inference
+│   ├── evaluate.py         # metrics, calibration, capacity policy
+│   ├── policy.py           # batch manual-review queue
+│   ├── analysis.py         # PSI, cohort, odds ratios
+│   └── explain.py          # local logistic contributions
+├── data/
+│   ├── data_manifest.json  # provenance/checksum/snapshot contract
+│   └── raw/                # raw CSV do người dùng tự cung cấp
+├── artifacts/              # generated model and contracts
+├── reports/                # generated reports
+├── tests/                  # canonical contract tests
+├── .github/workflows/ci.yml
+├── Dockerfile
+└── requirements*.txt
+```
 
----
+`artifacts/`, raw CSV và reports generated không phải source of truth; source of truth là code contract + manifest + temporal protocol.
 
-## 🚀 11. Prioritized Roadmap (Lộ Trình Phát Triển Platform)
+## 10. CI và kiểm thử
 
-| Ưu Tiên | Hạng Mục Công Việc | Trạng Thái |
-|---|---|---|
-| 🔴 **P0** | Train → Calibration → Policy Validation → Locked Test | ✅ Implemented |
-| 🔴 **P0** | Phân tách xác suất PD score khỏi cờ quyết định vận hành & thêm Risk Bands | ✅ Completed |
-| 🔴 **P0** | Phiên bản hóa `application-risk-v2` & `lifetime-chargeoff-v1` | ✅ Implemented |
-| 🔴 **P0** | Làm rõ phạm vi PD score, xác định EAD/LGD nằm trong roadmap | ✅ Completed |
-| 🔴 **P0** | Đảm bảo hiệu chỉnh xác suất bảo toàn thứ tự thời gian (Temporal Calibration) | ✅ Completed |
-| 🟠 **P1** | Bảng phân tích Decile Reliability Table & Lift@Decile1 | ✅ Completed |
-| 🟠 **P1** | Bổ sung chỉ số KS Statistic, Gini Coefficient & PR-AUC Lift | ✅ Completed |
-| 🟠 **P1** | Trích xuất Reason Codes kinh doanh cho hồ sơ rủi ro cao | ✅ Completed |
-| 🟡 **P2** | Thêm thuật toán HistGradientBoosting / XGBoost benchmark | ⏳ Planned |
-| 🟡 **P2** | Tối ưu ngưỡng dựa trên tổng giá trị dư nợ chịu rủi ro (Exposure-Weighted Threshold) | ⏳ Planned |
-| 🟡 **P3** | Xây dựng mô hình tổn thất khi vỡ nợ (LGD Model) riêng biệt | ⏳ Planned |
-| 🟡 **P3** | Hệ thống tính toán tổn thất kỳ vọng (Full Expected Loss Architecture) | ⏳ Planned |
+CI chạy trên push và pull request:
 
----
+1. Cài dependency cố định.
+2. `pip check` để phát hiện dependency conflict.
+3. `pytest` cho data maturity, feature order, temporal split, calibration, policy, inference và API schema.
+4. `compileall` kiểm tra syntax.
+5. Build Docker và polling `/health` tối đa 60 giây, luôn cleanup container.
 
-## 🛠️ 12. Quy Trình Tái Lập Thực Nghiệm (Reproducibility)
+Chạy local đầy đủ:
 
 ```bash
-# 1. Clone repository & chuẩn bị môi trường
-git clone https://github.com/haminhthong/loan-default-risk-prediction.git
-cd loan-default-risk-prediction
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1  # Windows PowerShell
-python -m pip install -r requirements-dev.txt
-
-# 2. Chạy quy trình huấn luyện end-to-end
-python -m src.train
-
-# 3. Thực thi toàn bộ suite kiểm thử tự động
+python -m pip check
 python -m pytest -q
+python -m compileall -q src app scripts
 ```
 
----
-*Loan Default Risk Decision Support Platform — Built for Production-Oriented Credit Risk Analytics.*
+## 11. Hạn chế, monitoring và bảo mật
+
+- Chỉ tính performance trên cohort đã maturity; cohort chưa maturity là censored, không phải good.
+- Theo dõi PSI trong `drift_psi.csv`, reliability trong `calibration_test.csv` và hiệu năng theo cohort trong `cohort_performance.csv`.
+- Capacity 20% là operating policy, không phải ngưỡng thiệt hại tài chính.
+- Không log raw applicant payload hoặc API key; bật `LOAN_API_KEY` khi triển khai có kiểm soát truy cập.
+- Dữ liệu lịch sử LendingClub và các tệp CSV người dùng cung cấp phải được xác minh source/license trước khi phân phối.
+
+Chi tiết intended use và hạn chế xem tại [MODEL_CARD.md](MODEL_CARD.md).

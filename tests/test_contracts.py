@@ -39,7 +39,7 @@ def test_maturity_gate_excludes_immature_and_current_loans():
 
 
 def test_application_contract_excludes_policy_features():
-    features = build_features(_loans(), include_pricing=False)
+    features = build_features(_loans())
     assert features.columns.tolist() == APPLICATION_FEATURE_COLUMNS
     assert {"grade", "int_rate", "installment", "addr_state", "issue_month"}.isdisjoint(
         features.columns

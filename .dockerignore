@@ -1,6 +1,10 @@
 .git
 .venv
 __pycache__
+.pytest_cache
+.pytest_temp
 .ipynb_checkpoints
+scratch
 data/*.csv
+artifacts/*.joblib
 reports/

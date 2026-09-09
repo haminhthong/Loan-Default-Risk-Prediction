@@ -11,8 +11,9 @@ Giao diện tương tác chuyên nghiệp gồm 3 Tab:
    Hiển thị thông số mô hình Champion, ngưỡng quyết định tối ưu và các metric thực nghiệm.
 """
 
-from pathlib import Path
+import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -23,10 +24,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.policy import build_review_queue  # noqa: E402
 from src.predict import load_artifact, predict  # noqa: E402
 
 # Đường dẫn mặc định đến file mô hình artifact
-MODEL_PATH = ROOT / "artifacts" / "loan_default_cv.joblib"
+MODEL_PATH = Path(
+    os.getenv("LOAN_RISK_MODEL_PATH", str(ROOT / "artifacts" / "risk_model.joblib"))
+)
 
 
 @st.cache_resource
@@ -49,7 +53,7 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
 
     with col1:
         loan_amnt = st.number_input("Số tiền xin vay (USD)", min_value=500, max_value=40000, value=10000, step=500)
-        term = st.selectbox("Kỳ hạn vay", options=["36 months", "60 months"], index=0)
+        term_months = st.selectbox("Kỳ hạn vay (tháng)", options=[36, 60], index=0)
 
     with col2:
         annual_inc = st.number_input("Tổng thu nhập hàng năm (USD)", min_value=5000, max_value=500000, value=60000, step=2500)
@@ -63,10 +67,12 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
             options=["debt_consolidation", "credit_card", "home_improvement", "major_purchase", "small_business", "other"],
             index=0,
         )
-        emp_length = st.selectbox(
-            "Thời gian làm việc",
-            options=["< 1 year", "1 year", "2 years", "3 years", "5 years", "10+ years"],
-            index=4,
+        emp_length_years = st.number_input(
+            "Thâm niên làm việc (năm)",
+            min_value=0.0,
+            max_value=10.0,
+            value=5.0,
+            step=0.5,
         )
 
     st.markdown("---")
@@ -80,57 +86,54 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
         total_acc = st.number_input("Tổng số tài khoản tín dụng lịch sử", min_value=1, max_value=100, value=20)
     with col6:
         revol_bal = st.number_input("Dư nợ tín dụng quay vòng (USD)", min_value=0, max_value=100000, value=5000)
-        revol_util_num = st.slider("Tỷ lệ sử dụng hạn mức quay vòng (%)", min_value=0.0, max_value=100.0, value=45.2, step=0.1)
+        revolving_utilization = st.slider(
+            "Tỷ lệ sử dụng hạn mức quay vòng",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.452,
+            step=0.01,
+        )
 
     if st.button("🚀 Chấm Điểm Hồ Sơ Tín Dụng", type="primary", use_container_width=True):
         # Chuẩn hóa dữ liệu đầu vào thành 1 bản ghi DataFrame
         single_record = {
             "loan_amnt": loan_amnt,
-            "term": term,
-            "emp_length": emp_length,
+            "term_months": term_months,
+            "emp_length_years": emp_length_years,
             "home_ownership": home_ownership,
             "annual_inc": annual_inc,
             "verification_status": verification_status,
             "purpose": purpose,
-            "addr_state": "CA",
             "dti": dti,
             "delinq_2yrs": delinq_2yrs,
             "inq_last_6mths": inq_last_6mths,
             "open_acc": open_acc,
             "pub_rec": 0,
             "revol_bal": revol_bal,
-            "revol_util": f"{revol_util_num:.2f}%",
+            "revolving_utilization": revolving_utilization,
             "total_acc": total_acc,
-            "earliest_cr_line": "Jan-00",
+            "credit_history_years": 12.0,
         }
 
         input_df = pd.DataFrame([single_record])
         pred_res = predict(input_df, artifact)
-        probability_column = (
-            "lifetime_chargeoff_probability"
-            if "lifetime_chargeoff_probability" in pred_res.columns
-            else "default_probability"
-        )
-        review_column = "review_required" if "review_required" in pred_res.columns else "default_prediction"
-        prob = float(pred_res.iloc[0][probability_column])
-        review_required = bool(pred_res.iloc[0][review_column])
-        threshold = float(artifact.get("policy", {}).get("threshold", artifact.get("threshold", 0.5)))
+        prob = float(pred_res.iloc[0]["lifetime_chargeoff_probability"])
+        risk_band = str(pred_res.iloc[0]["risk_band"])
 
         st.markdown("### 📊 Kết Quả Đánh Giá Rủi Ro Tín Dụng")
 
         res_col1, res_col2 = st.columns(2)
 
         with res_col1:
-            st.metric("Xác suất rủi ro vỡ nợ (Default Prob)", f"{prob * 100:.2f}%")
-            st.metric("Ngưỡng cảnh báo chi phí tối ưu", f"{threshold * 100:.2f}%")
+            st.metric("Xác suất lifetime charge-off", f"{prob * 100:.2f}%")
+            st.metric("Risk band", risk_band)
 
         with res_col2:
-            if review_required:
-                st.error("🚨 **HỒ SƠ ĐƯỢC ĐỀ XUẤT MANUAL REVIEW**")
-                st.warning("Đây là tín hiệu hỗ trợ thẩm định, không phải quyết định approve/reject.")
-            else:
-                st.success("✅ **MỨC CẢNH BÁO THẤP (LOWER RISK FLAG)**")
-                st.info("Kết quả chỉ là điểm rủi ro mô hình, không phải quyết định phê duyệt khoản vay.")
+            st.info(
+                "Điểm này chỉ hỗ trợ xếp hạng rủi ro, không phải quyết định "
+                "approve/reject hay adverse-action notice."
+            )
+            st.json(pred_res.iloc[0]["top_risk_factors"])
 
         # Hiển thị thanh đo rủi ro (Risk Gauge Meter)
         st.markdown("#### Đồng Hồ Đo Rủi Ro Tín Dụng")
@@ -175,23 +178,23 @@ def render_batch_tab(artifact: dict[str, Any]) -> None:
             with st.spinner("Đang chạy pipeline suy luận dự báo..."):
                 try:
                     predictions = predict(input_data, artifact)
-                    result_df = pd.concat([input_data, predictions], axis=1)
-                except Exception as err:
+                    queue = build_review_queue(predictions, artifact["policy"])
+                    result_df = pd.concat([input_data, queue], axis=1)
+                except Exception:
                     st.error(f"❌ Lỗi suy luận dự báo: Dữ liệu không tương thích hoặc thiếu thuộc tính bắt buộc.")
                     st.stop()
 
             st.success("✅ Đã hoàn tất chấm điểm hàng loạt!")
 
             # Thống kê nhanh kết quả
-            review_column = "review_required" if "review_required" in result_df.columns else "default_prediction"
-            high_risk_count = result_df[review_column].astype(bool).sum()
+            review_count = result_df["review_required"].astype(bool).sum()
             total_count = len(result_df)
-            high_risk_pct = (high_risk_count / total_count) * 100
+            review_rate = (review_count / total_count) * 100
 
             m1, m2, m3 = st.columns(3)
             m1.metric("Tổng hồ sơ xử lý", total_count)
-            m2.metric("Số hồ sơ Cảnh báo Vỡ nợ", high_risk_count)
-            m3.metric("Tỷ lệ Cảnh báo Rủi ro", f"{high_risk_pct:.1f}%")
+            m2.metric("Số hồ sơ manual review", review_count)
+            m3.metric("Tỷ lệ manual review", f"{review_rate:.1f}%")
 
             st.dataframe(result_df, use_container_width=True)
 
@@ -202,9 +205,6 @@ def render_batch_tab(artifact: dict[str, Any]) -> None:
                 file_name="loan_default_predictions_batch.csv",
                 mime="text/csv",
             )
-
-
-
 def render_diagnostics_tab(artifact: dict[str, Any]) -> None:
     """Hiển thị Tab 3: Tổng quan mô hình và báo cáo metrics."""
     st.markdown("### 📊 Tổng Quan & Chẩn Đoán Mô Hình (Model Diagnostics)")
@@ -212,7 +212,10 @@ def render_diagnostics_tab(artifact: dict[str, Any]) -> None:
     st.markdown("#### 🎯 Thông Số Mô Hình Champion")
     d1, d2, d3 = st.columns(3)
     d1.metric("Mô hình Champion", artifact.get("model_name", "calibrated_logistic_regression"))
-    d2.metric("Ngưỡng quyết định (Cost-based Threshold)", f"{artifact.get('threshold', 0.14):.2f}")
+    d2.metric(
+        "Ngưỡng review trong policy",
+        f"{artifact.get('policy', {}).get('threshold', 0.0):.2f}",
+    )
     d3.metric("Tổng số mẫu huấn luyện", f"{artifact.get('data_rows', 0):,}")
 
     st.markdown("---")
@@ -244,10 +247,13 @@ def main() -> None:
     )
 
     st.title("🏦 Loan Default Risk Decision Support Platform")
-    st.caption("A point-in-time, leakage-safe credit-risk decision support platform with temporal validation, calibrated probabilities, and cost-sensitive review thresholds.")
+    st.caption("A point-in-time, leakage-safe credit-risk decision support platform with temporal validation, calibrated probabilities, and capacity-constrained review policy.")
 
     if not MODEL_PATH.exists():
-        st.error("⚠️ Chưa tìm thấy file mô hình artifact tại `artifacts/loan_default_cv.joblib`. Vui lòng chạy `python -m src.train` trước!")
+        st.error(
+            "⚠️ Chưa tìm thấy artifacts/risk_model.joblib. "
+            "Hãy chạy python -m src.train sau khi xác minh dataset manifest."
+        )
         st.stop()
 
     artifact = get_model_artifact()
