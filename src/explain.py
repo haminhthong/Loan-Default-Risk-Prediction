@@ -12,11 +12,22 @@ def _feature_groups(preprocessor) -> list[str]:
     """Map từng cột sau one-hot về tên feature gốc."""
     names = preprocessor.get_feature_names_out()
     numeric = list(preprocessor.transformers_[0][2]) if preprocessor.transformers_ else []
-    categorical = list(preprocessor.transformers_[1][2]) if len(preprocessor.transformers_) > 1 else []
+    categorical = (
+        list(preprocessor.transformers_[1][2])
+        if len(preprocessor.transformers_) > 1
+        else []
+    )
     groups: list[str] = []
     for name in names:
         clean = name.split("__", 1)[-1]
-        match = next((col for col in categorical if clean == col or clean.startswith(f"{col}_")), None)
+        match = next(
+            (
+                col
+                for col in categorical
+                if clean == col or clean.startswith(f"{col}_")
+            ),
+            None,
+        )
         if match:
             groups.append(match)
         elif clean in numeric:
@@ -65,4 +76,3 @@ def logistic_contributions(
             ]
         )
     return results
-

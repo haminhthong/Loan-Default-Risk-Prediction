@@ -212,7 +212,13 @@ def slice_metrics(
                 ),
             }
         )
-    return pd.DataFrame(rows).sort_values("n", ascending=False).reset_index(drop=True) if rows else pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    return (
+        pd.DataFrame(rows)
+        .sort_values("n", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def bootstrap_metric_ci(

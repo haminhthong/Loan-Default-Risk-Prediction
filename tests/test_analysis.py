@@ -1,6 +1,4 @@
-"""
-Các bài kiểm thử tự động (Unit Tests) cho mô-đun phân tích hiệu chỉnh và dịch chuyển dữ liệu `src/analysis.py`.
-"""
+"""Kiểm thử calibration table và Population Stability Index."""
 
 import pandas as pd
 

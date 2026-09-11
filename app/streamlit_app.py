@@ -52,19 +52,52 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        loan_amnt = st.number_input("Số tiền xin vay (USD)", min_value=500, max_value=40000, value=10000, step=500)
+        loan_amnt = st.number_input(
+            "Số tiền xin vay (USD)",
+            min_value=500,
+            max_value=40000,
+            value=10000,
+            step=500,
+        )
         term_months = st.selectbox("Kỳ hạn vay (tháng)", options=[36, 60], index=0)
 
     with col2:
-        annual_inc = st.number_input("Tổng thu nhập hàng năm (USD)", min_value=5000, max_value=500000, value=60000, step=2500)
-        dti = st.slider("Tỷ lệ nợ trên thu nhập DTI (%)", min_value=0.0, max_value=50.0, value=15.2, step=0.1)
-        home_ownership = st.selectbox("Hình thức sở hữu nhà", options=["RENT", "MORTGAGE", "OWN", "OTHER"], index=0)
-        verification_status = st.selectbox("Xác minh thu nhập", options=["Verified", "Source Verified", "Not Verified"], index=0)
+        annual_inc = st.number_input(
+            "Tổng thu nhập hàng năm (USD)",
+            min_value=5000,
+            max_value=500000,
+            value=60000,
+            step=2500,
+        )
+        dti = st.slider(
+            "Tỷ lệ nợ trên thu nhập DTI (%)",
+            min_value=0.0,
+            max_value=50.0,
+            value=15.2,
+            step=0.1,
+        )
+        home_ownership = st.selectbox(
+            "Hình thức sở hữu nhà",
+            options=["RENT", "MORTGAGE", "OWN", "OTHER"],
+            index=0,
+        )
+        verification_status = st.selectbox(
+            "Xác minh thu nhập",
+            options=["Verified", "Source Verified", "Not Verified"],
+            index=0,
+        )
 
     with col3:
         purpose = st.selectbox(
             "Mục đích sử dụng khoản vay",
-            options=["debt_consolidation", "credit_card", "home_improvement", "major_purchase", "small_business", "other"],
+            options=[
+                "debt_consolidation",
+                "credit_card",
+                "home_improvement",
+                "major_purchase",
+                "small_business",
+                "other",
+            ],
             index=0,
         )
         emp_length_years = st.number_input(
@@ -79,13 +112,38 @@ def render_single_applicant_tab(artifact: dict[str, Any]) -> None:
     st.markdown("#### ⚙️ Thuộc Tính Tín Dụng Bổ Sung")
     col4, col5, col6 = st.columns(3)
     with col4:
-        delinq_2yrs = st.number_input("Số lần nợ quá hạn 2 năm qua", min_value=0, max_value=20, value=0)
-        inq_last_6mths = st.number_input("Số lần truy vấn tín dụng 6 tháng qua", min_value=0, max_value=10, value=1)
+        delinq_2yrs = st.number_input(
+            "Số lần nợ quá hạn 2 năm qua",
+            min_value=0,
+            max_value=20,
+            value=0,
+        )
+        inq_last_6mths = st.number_input(
+            "Số lần truy vấn tín dụng 6 tháng qua",
+            min_value=0,
+            max_value=10,
+            value=1,
+        )
     with col5:
-        open_acc = st.number_input("Số tài khoản tín dụng đang mở", min_value=1, max_value=50, value=10)
-        total_acc = st.number_input("Tổng số tài khoản tín dụng lịch sử", min_value=1, max_value=100, value=20)
+        open_acc = st.number_input(
+            "Số tài khoản tín dụng đang mở",
+            min_value=1,
+            max_value=50,
+            value=10,
+        )
+        total_acc = st.number_input(
+            "Tổng số tài khoản tín dụng lịch sử",
+            min_value=1,
+            max_value=100,
+            value=20,
+        )
     with col6:
-        revol_bal = st.number_input("Dư nợ tín dụng quay vòng (USD)", min_value=0, max_value=100000, value=5000)
+        revol_bal = st.number_input(
+            "Dư nợ tín dụng quay vòng (USD)",
+            min_value=0,
+            max_value=100000,
+            value=5000,
+        )
         revolving_utilization = st.slider(
             "Tỷ lệ sử dụng hạn mức quay vòng",
             min_value=0.0,
@@ -181,7 +239,10 @@ def render_batch_tab(artifact: dict[str, Any]) -> None:
                     queue = build_review_queue(predictions, artifact["policy"])
                     result_df = pd.concat([input_data, queue], axis=1)
                 except Exception:
-                    st.error(f"❌ Lỗi suy luận dự báo: Dữ liệu không tương thích hoặc thiếu thuộc tính bắt buộc.")
+                    st.error(
+                        "❌ Lỗi suy luận: dữ liệu không tương thích hoặc "
+                        "thiếu thuộc tính bắt buộc."
+                    )
                     st.stop()
 
             st.success("✅ Đã hoàn tất chấm điểm hàng loạt!")
@@ -232,7 +293,8 @@ def render_diagnostics_tab(artifact: dict[str, Any]) -> None:
         - **Point-in-Time Features**: Chỉ sử dụng các thuộc tính có sẵn trước lúc giải ngân.
         - **Temporal blocks**: Train → Calibration → Policy Validation → Locked Test.
         - **Capacity policy**: Chọn tối đa 20% hồ sơ có calibrated risk cao nhất để manual review.
-        - **Model factors**: Đóng góp Logistic Regression, không phải rule reason code hay causal explanation.
+        - **Model factors**: Đóng góp Logistic Regression, không phải rule reason code
+          hay causal explanation.
         """
     )
 
@@ -247,7 +309,11 @@ def main() -> None:
     )
 
     st.title("🏦 Loan Default Risk Decision Support Platform")
-    st.caption("A point-in-time, leakage-safe credit-risk decision support platform with temporal validation, calibrated probabilities, and capacity-constrained review policy.")
+    st.caption(
+        "A point-in-time, leakage-safe credit-risk decision support platform "
+        "with temporal validation, calibrated probabilities, and "
+        "capacity-constrained review policy."
+    )
 
     if not MODEL_PATH.exists():
         st.error(

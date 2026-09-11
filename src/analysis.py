@@ -1,11 +1,4 @@
-"""
-Mô-đun Phân Tích Giải Thích Mô Hình, Hiệu Chỉnh Xác Suất và Phát Hiện Dịch Chuyển Dữ Liệu (Data Drift).
-
-Chức năng:
-1. Bảng Hiệu chỉnh (Calibration Table): Đo lường độ tin cậy của xác suất dự báo so với tỷ lệ vỡ nợ thực tế.
-2. Chỉ số PSI (Population Stability Index): Đo lường sự thay đổi phân phối đặc trưng giữa tập Train và Test.
-3. Odds Ratio cho Logistic Regression: Giải thích mức độ tăng rủi ro khi một đặc trưng thay đổi.
-"""
+"""Báo cáo calibration, drift, cohort performance và odds ratio."""
 
 from __future__ import annotations
 
@@ -55,12 +48,12 @@ def population_stability_index(
     bins: int = 10,
 ) -> float:
     """
-    Tính chỉ số Population Stability Index (PSI) đo lường sự dịch chuyển phân phối dữ liệu (Data Drift).
+    Tính Population Stability Index (PSI) giữa train và test.
 
     Quy tắc đánh giá PSI chuẩn công nghiệp:
     - PSI < 0.1: Phân phối ổn định, không có sự thay đổi đáng kể.
     - 0.1 <= PSI <= 0.25: Có sự dịch chuyển nhẹ, cần tiếp tục giám sát.
-    - PSI > 0.25: Dịch chuyển phân phối mạnh (Significant Drift), cần cân nhắc tái huấn luyện mô hình.
+    - PSI > 0.25: Dịch chuyển mạnh, cần cân nhắc tái huấn luyện.
 
     Args:
         train (pd.Series): Phân phối đặc trưng trên tập Train.
@@ -103,7 +96,7 @@ def population_stability_index(
 
 def drift_report(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
     """
-    Tạo báo cáo xếp hạng mức độ dịch chuyển dữ liệu (Drift Report) giữa tập Train và Test cho toàn bộ đặc trưng.
+    Tạo báo cáo drift giữa Train và Locked Test cho toàn bộ feature.
 
     Args:
         train (pd.DataFrame): Ma trận đặc trưng tập Train.
@@ -126,7 +119,7 @@ def drift_report(train: pd.DataFrame, test: pd.DataFrame) -> pd.DataFrame:
 
 def logistic_odds_ratios(pipeline, top_n: int = 30) -> pd.DataFrame:
     """
-    Trích xuất hệ số hồi quy (Coefficients) và tỷ số chênh (Odds Ratios) từ mô hình Logistic Regression.
+    Trích xuất coefficient và odds ratio từ Logistic Regression.
 
     Ý nghĩa Odds Ratio:
     - Odds Ratio > 1.0: Đặc trưng làm TĂNG nguy cơ vỡ nợ (ví dụ 1.8x nghĩa là tăng 80% rủi ro).
