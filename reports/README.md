@@ -1,22 +1,19 @@
-# Báo cáo có thể tái tạo
+# Báo Cáo & Kết Quả Thực Nghiệm
 
-Các file trong thư mục này được sinh bởi:
+Các file trong thư mục này được sinh tự động sau khi chạy quy trình huấn luyện:
 
 ```bash
-python -m src.train --data data/raw/lendingclub_2007_2011.csv --manifest data/data_manifest.json
+python -m src.train
 ```
 
-## Canonical outputs
+## Các đầu ra phân tích thực nghiệm
 
-- `model_cv.csv`: expanding-window CV để chọn C trong Train.
-- `test_metrics.json`: metric duy nhất trên Locked Test.
-- `bootstrap_ci.json`: khoảng tin cậy bootstrap cho metric chính.
-- `target_censoring.csv`: maturity và censoring theo cohort.
-- `calibration_test.csv`: reliability theo probability bin.
-- `decile_reliability.csv`: ranking và captured defaults theo decile.
-- `drift_psi.csv`: PSI giữa Train và Locked Test.
-- `cohort_performance.csv`: performance chỉ ở cohort đã mature.
-- `logistic_odds_ratios.csv`: coefficient và odds ratio global.
-- `slice_*.csv`: metric theo application slice đủ cỡ mẫu.
-
-Không commit số liệu kết quả nếu chưa biết snapshot/manifest. Reports không thay thế artifact contract và không được dùng để tự chọn lại threshold sau Locked Test.
+- `test_metrics.json`: Các metric đánh giá trên tập Out-of-Time Test (PR-AUC, ROC-AUC, Brier score, Capture@20%, KS statistic, Lift@20%).
+- `bootstrap_ci.json`: Khoảng tin cậy Bootstrap 95% cho các metric trọng tâm.
+- `decile_reliability.csv`: Bảng phân tích 10 phân vị (Deciles) rủi ro, đối chiếu giữa xác suất dự báo trung bình và tỷ lệ vỡ nợ thực tế.
+- `model_coefficients.csv`: Trọng số chuẩn hóa của Logistic Regression sau tiền xử lý, thể hiện hướng tác động (`increases_risk` / `decreases_risk`).
+- `model_cv.csv`: Kết quả tìm kiếm siêu tham số $C$ qua expanding-window temporal CV trên tập Train.
+- `target_censoring.csv`: Phân tích thống kê về tỷ lệ Maturity vs Censored theo từng cohort tháng phát hành khoản vay.
+- `drift_psi.csv`: Chỉ số Population Stability Index (PSI) đo lường độ dịch chuyển phân phối đặc trưng giữa Train và Out-of-Time Test.
+- `cohort_performance.csv`: Đánh giá hiệu năng của mô hình theo từng quý phát hành (Origination Cohort).
+- `slice_*.csv`: Đánh giá hiệu năng theo từng phân khúc thuộc tính nộp đơn (Home Ownership, Verification Status, Purpose).

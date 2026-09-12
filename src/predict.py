@@ -1,4 +1,4 @@
-"""Inference production với feature, target và policy contract chặt chẽ."""
+"""Module phục vụ suy luận (Inference) xác suất rủi ro vỡ nợ khoản vay."""
 
 from __future__ import annotations
 
@@ -10,105 +10,65 @@ import joblib
 import pandas as pd
 
 from src.explain import logistic_contributions
-from src.features import (
-    APPLICATION_FEATURE_COLUMNS,
-    FEATURE_CONTRACT_VERSION,
-    build_features,
-)
+from src.features import FEATURE_COLUMNS, build_features
 
 
 class ArtifactError(RuntimeError):
-    """Artifact không đủ hoặc không khớp contract production."""
-
-
-REQUIRED_ARTIFACT_KEYS = {
-    "pipeline",
-    "base_pipeline",
-    "feature_columns",
-    "feature_schema",
-    "target_contract",
-    "policy",
-    "model_name",
-    "model_version",
-}
-
-
-def _validate_artifact(artifact: dict[str, Any]) -> None:
-    missing = REQUIRED_ARTIFACT_KEYS - artifact.keys()
-    if missing:
-        raise ArtifactError(f"Artifact thiếu key: {sorted(missing)}")
-    columns = artifact["feature_columns"]
-    if columns != APPLICATION_FEATURE_COLUMNS:
-        raise ArtifactError("Artifact không khớp thứ tự application feature contract.")
-    schema = artifact["feature_schema"]
-    if schema.get("version") != FEATURE_CONTRACT_VERSION:
-        raise ArtifactError("Artifact dùng sai feature contract version.")
-    if schema.get("features") != columns:
-        raise ArtifactError("feature_schema không khớp feature_columns.")
-    policy = artifact["policy"]
-    required_policy = {
-        "version",
-        "threshold",
-        "maximum_review_rate",
-        "risk_band_bounds",
-    }
-    if not required_policy.issubset(policy):
-        raise ArtifactError("Artifact thiếu review policy contract.")
+    """Lỗi khi tải hoặc xác thực model artifact."""
 
 
 def load_artifact(
     path: str | Path = "artifacts/risk_model.joblib",
 ) -> dict[str, Any]:
-    """Nạp artifact và kiểm tra contract trước khi cho phép inference."""
+    """Tải và xác thực nhanh artifact mô hình."""
     artifact_path = Path(path)
     if not artifact_path.is_file():
-        raise FileNotFoundError(f"Không tìm thấy artifact: {artifact_path}")
+        raise FileNotFoundError(f"Không tìm thấy model artifact tại: {artifact_path}")
     try:
         artifact = joblib.load(artifact_path)
     except Exception as exc:
         raise ArtifactError(f"Không thể nạp artifact: {exc}") from exc
+
     if not isinstance(artifact, dict):
-        raise ArtifactError("Artifact phải là dict.")
-    _validate_artifact(artifact)
+        raise ArtifactError("Artifact phải là đối tượng dict.")
+
+    # Hỗ trợ cả key mới 'model' và key cũ 'pipeline'
+    model = artifact.get("model") or artifact.get("pipeline")
+    if model is None:
+        raise ArtifactError("Artifact thiếu đối tượng mô hình dự báo.")
+
+    feature_cols = artifact.get("feature_columns")
+    if feature_cols != FEATURE_COLUMNS:
+        raise ArtifactError(f"Danh sách đặc trưng trong artifact không khớp chuẩn ({len(feature_cols or [])} vs {len(FEATURE_COLUMNS)}).")
+
     return artifact
 
 
-def get_risk_band(
-    probability: float,
-    policy: dict[str, Any],
-) -> str:
-    """Ánh xạ xác suất theo boundary đã freeze trong policy."""
-    bounds = policy["risk_band_bounds"]
-    if probability < float(bounds["low_max"]):
-        return "LOW"
-    if probability <= float(bounds["medium_max"]):
-        return "MEDIUM"
-    return "HIGH"
-
-
 def predict(data: pd.DataFrame, artifact: dict[str, Any]) -> pd.DataFrame:
-    """Trả probability và model factor; không trả approve/reject."""
-    _validate_artifact(artifact)
+    """Dự báo xác suất vỡ nợ (Charge-off Probability) và trích xuất nhân tố rủi ro chính."""
     if data.empty:
         raise ValueError("Không thể chấm điểm DataFrame rỗng.")
-    features = build_features(data).reindex(columns=APPLICATION_FEATURE_COLUMNS)
-    probability = artifact["pipeline"].predict_proba(features)[:, 1]
-    try:
-        factors = logistic_contributions(
-            artifact["base_pipeline"],
-            features,
-            top_n=3,
-        )
-    except (AttributeError, KeyError, ValueError):
+
+    features = build_features(data).reindex(columns=FEATURE_COLUMNS)
+    model = artifact.get("model") or artifact["pipeline"]
+    probabilities = model.predict_proba(features)[:, 1]
+
+    base_model = artifact.get("base_model") or artifact.get("base_pipeline")
+    factors: list[list[dict[str, Any]]] = []
+    if base_model is not None:
+        try:
+            factors = logistic_contributions(base_model, features, top_n=3)
+        except Exception:
+            factors = [[] for _ in range(len(features))]
+    else:
         factors = [[] for _ in range(len(features))]
-    policy = artifact["policy"]
+
     scored_at = datetime.now(timezone.utc).isoformat()
+
     return pd.DataFrame(
         {
-            "lifetime_chargeoff_probability": probability,
-            "risk_band": [
-                get_risk_band(float(value), policy) for value in probability
-            ],
+            "chargeoff_probability": probabilities,
+            "lifetime_chargeoff_probability": probabilities,
             "top_risk_factors": factors,
             "scored_at": scored_at,
         },

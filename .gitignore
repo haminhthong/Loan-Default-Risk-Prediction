@@ -188,3 +188,5 @@ artifacts/*.joblib
 # Không phân phối lại dữ liệu khi giấy phép chưa được xác minh
 data/*.csv
 data/**/*.csv
+scratch/
+

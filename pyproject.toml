@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loan-default-risk-prediction"
+version = "1.0.0"
+description = "Temporal Loan Charge-Off Risk Modeling with Calibrated Logistic Regression"
+authors = [
+    { name = "Ha Minh Thong" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=2.2.0",
+    "numpy>=2.0.0",
+    "scikit-learn>=1.5.0",
+    "joblib>=1.4.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "pydantic>=2.10.0",
+    "streamlit>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+    "matplotlib>=3.9.0",
+    "seaborn>=0.13.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"

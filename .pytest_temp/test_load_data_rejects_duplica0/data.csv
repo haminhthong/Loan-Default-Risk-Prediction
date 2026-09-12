@@ -1,4 +1,0 @@
-id,loan_status,issue_d,loan_amnt,term,int_rate,installment,grade,sub_grade,emp_length,home_ownership,annual_inc,verification_status,purpose,addr_state,dti,total_acc
-1,Fully Paid,Dec-10,5000,36 months,10.00%,200,B,B2,2 years,RENT,50000,Verified,debt_consolidation,CA,0.2,4
-1,Charged Off,Mar-11,5000,36 months,10.00%,200,B,B2,2 years,RENT,50000,Verified,debt_consolidation,CA,0.2,4
-3,Fully Paid,Sep-11,5000,36 months,10.00%,200,B,B2,2 years,RENT,50000,Verified,debt_consolidation,CA,0.2,4

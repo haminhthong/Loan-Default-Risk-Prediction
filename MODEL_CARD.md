@@ -1,28 +1,46 @@
-# Model Card: Funded-Loan Lifetime Charge-Off Risk Scoring
+# Model Card: Funded-Loan Lifetime Charge-Off Risk Prediction
 
-## Intended Use
+## 1. Task (Nhiệm Vụ Mô Hình)
+Dự báo xác suất một khoản vay đã được cấp vốn sẽ rơi vào trạng thái vỡ nợ hợp đồng (`Charged Off`) trong toàn bộ vòng đời:
+$$P(\text{Charged Off} \mid \text{Funded Loan})$$
 
-Hệ thống ước lượng `lifetime_chargeoff_probability` cho các hồ sơ giống khoản vay
-đã được cấp vốn trong dữ liệu LendingClub lịch sử. Đây là risk scoring và hỗ trợ
-manual review; hệ thống không tự động phê duyệt, từ chối hoặc ấn định lãi suất.
+## 2. Target Population (Quần Thể Mục Tiêu)
+- **Quần thể:** Các khoản vay lịch sử của LendingClub đã vượt qua quy trình thẩm định nội bộ và **đã được giải ngân** (Historical Funded Loans).
+- **Lưu ý Selection Bias:** Mô hình không áp dụng cho mọi người nộp đơn tín dụng chưa qua thẩm định ban đầu (Unfiltered Applicants).
 
-## Model & Architecture Alignment (8 Canonical Stages)
+## 3. Target Definition (Định Nghĩa Nhãn & Xử Lý Censoring)
+- **Nhãn nhị phân:**
+  - $1$: Khoản vay bị `Charged Off`.
+  - $0$: Khoản vay được tất toán đầy đủ (`Fully Paid`).
+- **Maturity-based Cohort Filtering:** Khoản vay chỉ được đưa vào tập huấn luyện nếu đã trải qua đủ thời hạn danh nghĩa của hợp đồng ($\text{issue\_date} + \text{term\_months} \le \text{dataset\_as\_of\_date}$). Các khoản vay `Current` hoặc chưa đủ kỳ hạn bị coi là `CENSORED` và loại bỏ để tránh tạo nhãn sai. Không giả định đây là mô hình survival phân tích sống sót liên tục.
 
-- **Base model**: L2 Logistic Regression, `class_weight=None`, tune `C` bằng expanding-window CV trong Train.
-- **Calibration**: Sigmoid calibration fit riêng trên Calibration block; không dùng Locked Test.
-- **Temporal Protocol**: Train `< 2011-01-01`, Calibration `2011 Q1`, Policy Validation `2011 Q2`, Locked Test `>= 2011-07-01`.
-- **Feature contract**: `application-risk-v2`, loại `int_rate`, `grade`, `sub_grade`, `installment`, `addr_state` và `issue_month` khỏi production score.
-- **Decision policy**: `manual-review-capacity-v1`, xếp hạng probability giảm dần và chọn tối đa 20% hồ sơ vào hàng đợi manual review.
+## 4. Features (Đặc Trưng Tại Thời Điểm Nộp Đơn)
+Bao gồm 16 đặc trưng độc lập tại thời điểm nộp đơn:
+- Thông tin khoản vay: `loan_amnt`, `term_months`.
+- Thông tin người vay: `annual_inc` (qua biến đổi $\log(1 + x)$), `emp_length_years`, `home_ownership`, `verification_status`, `purpose`, `dti`.
+- Lịch sử tín dụng: `delinq_2yrs`, `inq_last_6mths`, `open_acc`, `pub_rec`, `revol_bal`, `revolving_utilization`, `total_acc`, `credit_history_years`.
+- **Loại trừ rò rỉ (Leakage & Proxy Exclusion):**
+  - Loại bỏ hoàn toàn các biến phát sinh sau giải ngân (`total_pymnt`, `recoveries`, `last_pymnt_d`, v.v.).
+  - Loại bỏ các biến phản ánh điểm số/chính sách định giá của nền tảng (`grade`, `sub_grade`, `int_rate`, `installment`) để tránh học lại điểm có sẵn của LendingClub.
 
-## Scope & Operational Boundary
+## 5. Model Architecture (Kiến Trúc Mô Hình)
+- **Base Model:** L2-regularized Logistic Regression với tiền xử lý chuẩn (Median Imputation + StandardScaler cho biến số; Most Frequent + OneHotEncoder cho biến phân loại).
+- **Tối ưu hóa:** Tìm kiếm tham số $C \in \{0.01, 0.1, 1.0, 10.0\}$ bằng expanding-window temporal CV trên tập Train.
+- **Probability Calibration:** Platt/Sigmoid calibration trên tập Calibration độc lập, chỉ kích hoạt nếu cải thiện độ tin cậy xác suất (Brier score).
 
-- **Target**: `Charged Off = 1`, `Fully Paid = 0`; khoản vay chưa đủ `issue_date + term <= dataset_as_of_date` là `CENSORED` và không vào train/test.
-- **Population**: `P(Charged Off | Funded Loan)`, không phải xác suất trên mọi applicant chưa qua underwriting.
-- **Phân tách tầng quyết định**: Model trả probability và model factors; policy riêng tạo `review_required`. Không có output approve/reject.
+## 6. Evaluation (Đánh Giá Kiểm Định Out-of-Time)
+- **Phân tách thời gian:** Huấn luyện trên quá khứ (trước 2011), hiệu chỉnh đầu năm 2011, và kiểm thử độc lập trên tương lai (OOT Test $\ge$ 2011-04-01).
+- **Metric cốt lõi:**
+  - **PR-AUC:** Thước đo chính đánh giá khả năng xếp hạng trong bài toán mất cân bằng nhãn.
+  - **ROC-AUC:** Thước đo phân ly nhị phân tổng quát.
+  - **Brier Score:** Thước đo độ chuẩn xác của xác suất dự báo.
+  - **Capture@20%:** Tỷ lệ nợ xấu thực tế bắt được trong nhóm 20% hồ sơ có điểm rủi ro cao nhất.
 
-## Hạn Chế & Cảnh Báo Vận Hành
+## 7. Intended Use (Mục Đích Sử Dụng)
+- Hỗ trợ nhân viên tín dụng xếp hạng hồ sơ và nhận diện các yếu tố rủi ro tiềm ẩn trong quá trình thẩm định thủ công.
+- Công cụ giáo dục và minh họa kỹ thuật credit-risk modeling có kiểm soát chặt chẽ về rò rỉ thông tin và tính chuẩn xác của xác suất.
 
-- Out-of-time test chỉ đại diện cho snapshot lịch sử; không tự động suy rộng sang portfolio mới.
-- Capacity 20% là operating policy, không phải ngưỡng tổn thất tài chính hay quyết định cấp tín dụng.
-- Local factors là đóng góp của model, không chứng minh quan hệ nhân quả và không phải adverse-action notice chính thức.
-- Performance chỉ tính trên cohort đã mature; cohort chưa mature chỉ được theo dõi missingness, category drift và score drift.
+## 8. Limitations (Hạn Chế Nghiệp Vụ)
+- Mô hình không tự động phê duyệt (Approve) hoặc từ chối (Reject) hồ sơ; không tính toán lãi suất hay tổn thất kỳ vọng (Expected Loss).
+- Các nhân tố giải thích cục bộ chỉ phản ánh hành vi toán học của mô hình tuyến tính, không phải bằng chứng quan hệ nhân quả kinh tế và không thay thế thông báo từ chối tín dụng (Adverse Action Notice).
+- Mô hình phản ánh điều kiện kinh tế và danh mục tín dụng giai đoạn 2007-2011; cần hiệu chỉnh lại khi áp dụng cho các môi trường kinh tế vĩ mô khác biệt.

@@ -1,2 +1,0 @@
-feature_set_mode,feature_count,selected_C,cv_pr_auc,calibration_pr_auc,data_scope
-not_generated,,,,,train_and_calibration_only
